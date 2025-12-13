@@ -2431,10 +2431,12 @@ impl DataFrame {
                     // Try to cast fill value to column type. If the cast fails, fallback to the original column.
                     match value.clone().cast_to(field.data_type()) {
                         Ok(fill_value) => Expr::Alias(Alias {
-                            expr: Box::new(Expr::ScalarFunction(ScalarFunction {
-                                func: coalesce(),
-                                args: vec![col(field.name()), lit(fill_value)],
-                            })),
+                            expr: Box::new(Expr::ScalarFunction(
+                                ScalarFunction::new_udf(
+                                    coalesce(),
+                                    vec![col(field.name()), lit(fill_value)],
+                                ),
+                            )),
                             relation: None,
                             name: field.name().to_string(),
                             metadata: None,

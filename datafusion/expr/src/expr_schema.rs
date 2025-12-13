@@ -31,12 +31,21 @@ use arrow::datatypes::{DataType, Field, FieldRef};
 use datafusion_common::datatype::FieldExt;
 use datafusion_common::metadata::FieldMetadata;
 use datafusion_common::{
-    Column, DataFusionError, ExprSchema, Result, ScalarValue, Spans, TableReference,
-    not_impl_err, plan_datafusion_err, plan_err,
+    Column, DataFusionError, Diagnostic, ExprSchema, Result, ScalarValue, Span, Spans,
+    TableReference, not_impl_err, plan_datafusion_err, plan_err,
 };
 use datafusion_expr_common::type_coercion::binary::BinaryTypeCoercer;
 use datafusion_functions_window_common::field::WindowUDFFieldArgs;
 use std::sync::Arc;
+
+fn function_call_span(spans: Option<&Spans>, args: &[Expr]) -> Option<Span> {
+    spans.and_then(|s| s.first()).or_else(|| {
+        Span::union_iter(
+            args.iter()
+                .filter_map(|arg| arg.spans().and_then(|spans| spans.first())),
+        )
+    })
+}
 
 /// Trait to allow expr to typable with respect to a schema
 pub trait ExprSchemable {
@@ -164,6 +173,7 @@ impl ExprSchemable for Expr {
             Expr::AggregateFunction(AggregateFunction {
                 func,
                 params: AggregateFunctionParams { args, .. },
+                ..
             }) => {
                 let fields = args
                     .iter()
@@ -546,7 +556,7 @@ impl ExprSchemable for Expr {
                 let AggregateFunction {
                     func,
                     params: AggregateFunctionParams { args, .. },
-                    ..
+                    spans,
                 } = aggregate_function;
 
                 let fields = args
@@ -561,7 +571,23 @@ impl ExprSchemable for Expr {
                             .map(|f| f.data_type())
                             .cloned()
                             .collect::<Vec<_>>();
-                        plan_datafusion_err!(
+                        let call_span = function_call_span(Some(spans), args);
+                        let diagnostic = Diagnostic::new_error(
+                            format!(
+                                "Invalid argument types for function '{}'",
+                                func.name()
+                            ),
+                            call_span,
+                        )
+                        .with_note(
+                            utils::generate_signature_error_msg(
+                                func.name(),
+                                func.signature().clone(),
+                                &arg_types,
+                            ),
+                            None,
+                        );
+                        let message = format!(
                             "{} {}",
                             match err {
                                 DataFusionError::Plan(msg) => msg,
@@ -572,14 +598,15 @@ impl ExprSchemable for Expr {
                                 func.signature().clone(),
                                 &arg_types,
                             )
-                        )
+                        );
+                        plan_datafusion_err!("{}", message; diagnostic=diagnostic)
                     })?
                     .into_iter()
                     .collect::<Vec<_>>();
 
                 func.return_field(&new_fields)
             }
-            Expr::ScalarFunction(ScalarFunction { func, args }) => {
+            Expr::ScalarFunction(ScalarFunction { func, args, spans }) => {
                 let (arg_types, fields): (Vec<DataType>, Vec<Arc<Field>>) = args
                     .iter()
                     .map(|e| e.to_field(schema).map(|(_, f)| f))
@@ -590,7 +617,22 @@ impl ExprSchemable for Expr {
                 // Verify that function is invoked with correct number and type of arguments as defined in `TypeSignature`
                 let new_data_types = data_types_with_scalar_udf(&arg_types, func)
                     .map_err(|err| {
-                        plan_datafusion_err!(
+                        let diagnostic = Diagnostic::new_error(
+                            format!(
+                                "Invalid argument types for function '{}'",
+                                func.name()
+                            ),
+                            function_call_span(Some(spans), args),
+                        )
+                        .with_note(
+                            utils::generate_signature_error_msg(
+                                func.name(),
+                                func.signature().clone(),
+                                &arg_types,
+                            ),
+                            None,
+                        );
+                        let message = format!(
                             "{} {}",
                             match err {
                                 DataFusionError::Plan(msg) => msg,
@@ -601,7 +643,8 @@ impl ExprSchemable for Expr {
                                 func.signature().clone(),
                                 &arg_types,
                             )
-                        )
+                        );
+                        plan_datafusion_err!("{}", message; diagnostic=diagnostic)
                     })?;
                 let new_fields = fields
                     .into_iter()
@@ -727,9 +770,25 @@ impl Expr {
                     .map(|f| f.data_type())
                     .cloned()
                     .collect::<Vec<_>>();
+                let call_span = function_call_span(None, args);
                 let new_fields = fields_with_aggregate_udf(&fields, udaf)
                     .map_err(|err| {
-                        plan_datafusion_err!(
+                        let diagnostic = Diagnostic::new_error(
+                            format!(
+                                "Invalid argument types for function '{}'",
+                                fun.name()
+                            ),
+                            call_span,
+                        )
+                        .with_note(
+                            utils::generate_signature_error_msg(
+                                fun.name(),
+                                fun.signature(),
+                                &data_types,
+                            ),
+                            None,
+                        );
+                        let message = format!(
                             "{} {}",
                             match err {
                                 DataFusionError::Plan(msg) => msg,
@@ -740,7 +799,8 @@ impl Expr {
                                 fun.signature(),
                                 &data_types
                             )
-                        )
+                        );
+                        plan_datafusion_err!("{}", message; diagnostic=diagnostic)
                     })?
                     .into_iter()
                     .collect::<Vec<_>>();
@@ -755,9 +815,25 @@ impl Expr {
                     .map(|f| f.data_type())
                     .cloned()
                     .collect::<Vec<_>>();
+                let call_span = function_call_span(None, args);
                 let new_fields = fields_with_window_udf(&fields, udwf)
                     .map_err(|err| {
-                        plan_datafusion_err!(
+                        let diagnostic = Diagnostic::new_error(
+                            format!(
+                                "Invalid argument types for function '{}'",
+                                fun.name()
+                            ),
+                            call_span,
+                        )
+                        .with_note(
+                            utils::generate_signature_error_msg(
+                                fun.name(),
+                                fun.signature(),
+                                &data_types,
+                            ),
+                            None,
+                        );
+                        let message = format!(
                             "{} {}",
                             match err {
                                 DataFusionError::Plan(msg) => msg,
@@ -768,7 +844,8 @@ impl Expr {
                                 fun.signature(),
                                 &data_types
                             )
-                        )
+                        );
+                        plan_datafusion_err!("{}", message; diagnostic=diagnostic)
                     })?
                     .into_iter()
                     .collect::<Vec<_>>();

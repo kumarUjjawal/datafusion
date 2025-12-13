@@ -1182,13 +1182,13 @@ mod tests {
         );
 
         // Via ExprSchemable::get_type (e.g. SimplifyInfo)
-        let udf_expr = Expr::ScalarFunction(ScalarFunction {
-            func: array_element_udf(),
-            args: vec![
+        let udf_expr = Expr::ScalarFunction(ScalarFunction::new_udf(
+            array_element_udf(),
+            vec![
                 Expr::Column(Column::new_unqualified("my_array")),
                 Expr::Column(Column::new_unqualified("my_index")),
             ],
-        });
+        ));
         assert_eq!(
             ExprSchemable::get_type(&udf_expr, &schema).unwrap(),
             fixed_size_list_type

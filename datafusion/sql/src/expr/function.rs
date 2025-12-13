@@ -341,7 +341,10 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
             };
 
             // After resolution, all arguments are positional
-            let inner = ScalarFunction::new_udf(fm, resolved_args);
+            let mut inner = ScalarFunction::new_udf(fm, resolved_args);
+            if let Some(span) = Span::try_from_sqlparser_span(sql_parser_span) {
+                inner.spans_mut().add_span(span);
+            }
 
             if name.eq_ignore_ascii_case(inner.name()) {
                 return Ok(Expr::ScalarFunction(inner));
@@ -621,7 +624,7 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                     null_treatment,
                 } = aggregate_expr;
 
-                let inner = expr::AggregateFunction::new_udf(
+                let mut inner = expr::AggregateFunction::new_udf(
                     func,
                     args,
                     distinct,
@@ -629,6 +632,9 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                     order_by,
                     null_treatment,
                 );
+                if let Some(span) = Span::try_from_sqlparser_span(sql_parser_span) {
+                    inner.spans.add_span(span);
+                }
 
                 if name.eq_ignore_ascii_case(inner.func.name()) {
                     return Ok(Expr::AggregateFunction(inner));

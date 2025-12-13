@@ -226,11 +226,11 @@ impl TreeNode for Expr {
             Expr::TryCast(TryCast { expr, data_type }) => expr
                 .map_elements(f)?
                 .update_data(|be| Expr::TryCast(TryCast::new(be, data_type))),
-            Expr::ScalarFunction(ScalarFunction { func, args }) => {
+            Expr::ScalarFunction(ScalarFunction { func, args, spans }) => {
                 args.map_elements(f)?.map_data(|new_args| {
-                    Ok(Expr::ScalarFunction(ScalarFunction::new_udf(
-                        func, new_args,
-                    )))
+                    let mut new_fun = ScalarFunction::new_udf(func, new_args);
+                    new_fun.spans = spans;
+                    Ok(Expr::ScalarFunction(new_fun))
                 })?
             }
             Expr::WindowFunction(window_fun) => {
@@ -277,16 +277,19 @@ impl TreeNode for Expr {
                         order_by,
                         null_treatment,
                     },
+                spans,
             }) => (args, filter, order_by).map_elements(f)?.map_data(
                 |(new_args, new_filter, new_order_by)| {
-                    Ok(Expr::AggregateFunction(AggregateFunction::new_udf(
+                    let mut new_fun = AggregateFunction::new_udf(
                         func,
                         new_args,
                         distinct,
                         new_filter,
                         new_order_by,
                         null_treatment,
-                    )))
+                    );
+                    new_fun.spans = spans;
+                    Ok(Expr::AggregateFunction(new_fun))
                 },
             )?,
             Expr::GroupingSet(grouping_set) => match grouping_set {

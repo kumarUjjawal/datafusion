@@ -76,6 +76,7 @@ fn is_single_distinct_agg(aggr_expr: &[Expr]) -> Result<bool> {
                     order_by,
                     null_treatment: _,
                 },
+            ..
         }) = expr
         {
             if filter.is_some() || !order_by.is_empty() {
@@ -186,6 +187,7 @@ impl OptimizerRule for SingleDistinctToGroupBy {
                                 AggregateFunctionParams {
                                     mut args, distinct, ..
                                 },
+                            ..
                         }) => {
                             if distinct {
                                 assert_eq_or_internal_err!(

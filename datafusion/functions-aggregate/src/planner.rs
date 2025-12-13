@@ -43,16 +43,14 @@ impl ExprPlanner for AggregateFunctionPlanner {
             null_treatment,
         } = raw_expr;
 
-        let origin_expr = Expr::AggregateFunction(AggregateFunction {
+        let origin_expr = Expr::AggregateFunction(AggregateFunction::new_udf(
             func,
-            params: AggregateFunctionParams {
-                args,
-                distinct,
-                filter,
-                order_by,
-                null_treatment,
-            },
-        });
+            args,
+            distinct,
+            filter,
+            order_by,
+            null_treatment,
+        ));
 
         let saved_name = NamePreserver::new_for_projection().save(&origin_expr);
 
@@ -66,6 +64,7 @@ impl ExprPlanner for AggregateFunctionPlanner {
                     order_by,
                     null_treatment,
                 },
+            ..
         }) = origin_expr
         else {
             unreachable!("")

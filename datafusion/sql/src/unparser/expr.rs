@@ -114,7 +114,7 @@ impl Unparser<'_> {
                     negated: *negated,
                 })
             }
-            Expr::ScalarFunction(ScalarFunction { func, args }) => {
+            Expr::ScalarFunction(ScalarFunction { func, args, .. }) => {
                 let func_name = func.name();
 
                 if let Some(expr) = self
@@ -2970,18 +2970,18 @@ mod tests {
             [(default_dialect, "DOUBLE"), (postgres_dialect, "NUMERIC")]
         {
             let unparser = Unparser::new(dialect.as_ref());
-            let expr = Expr::ScalarFunction(ScalarFunction {
-                func: Arc::new(ScalarUDF::from(
+            let expr = Expr::ScalarFunction(ScalarFunction::new_udf(
+                Arc::new(ScalarUDF::from(
                     datafusion_functions::math::round::RoundFunc::new(),
                 )),
-                args: vec![
+                vec![
                     Expr::Cast(Cast {
                         expr: Box::new(col("a")),
                         data_type: DataType::Float64,
                     }),
                     Expr::Literal(ScalarValue::Int64(Some(2)), None),
                 ],
-            });
+            ));
             let ast = unparser.expr_to_sql(&expr)?;
 
             let actual = format!("{ast}");
@@ -3035,10 +3035,10 @@ mod tests {
             (sqlite_dialect, "datetime(`date_col`, 'unixepoch')"),
         ] {
             let unparser = Unparser::new(dialect.as_ref());
-            let expr = Expr::ScalarFunction(ScalarFunction {
-                func: Arc::new(ScalarUDF::from(FromUnixtimeFunc::new())),
-                args: vec![col("date_col")],
-            });
+            let expr = Expr::ScalarFunction(ScalarFunction::new_udf(
+                Arc::new(ScalarUDF::from(FromUnixtimeFunc::new())),
+                vec![col("date_col")],
+            ));
 
             let ast = unparser.expr_to_sql(&expr)?;
 
@@ -3114,15 +3114,15 @@ mod tests {
             ),
         ] {
             let unparser = Unparser::new(dialect.as_ref());
-            let expr = Expr::ScalarFunction(ScalarFunction {
-                func: Arc::new(ScalarUDF::from(
+            let expr = Expr::ScalarFunction(ScalarFunction::new_udf(
+                Arc::new(ScalarUDF::from(
                     datafusion_functions::datetime::date_trunc::DateTruncFunc::new(),
                 )),
-                args: vec![
+                vec![
                     Expr::Literal(ScalarValue::Utf8(Some(precision.to_string())), None),
                     col("date_col"),
                 ],
-            });
+            ));
 
             let ast = unparser.expr_to_sql(&expr)?;
 

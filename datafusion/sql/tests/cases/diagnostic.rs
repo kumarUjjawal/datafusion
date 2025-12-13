@@ -15,7 +15,8 @@
 // specific language governing permissions and limitations
 // under the License.
 
-use datafusion_functions::string;
+use datafusion_functions::{math, string};
+use datafusion_functions_aggregate::sum;
 use insta::assert_snapshot;
 use std::{collections::HashMap, sync::Arc};
 
@@ -39,7 +40,9 @@ fn do_query(sql: &'static str) -> Diagnostic {
         ..ParserOptions::default()
     };
     let state = MockSessionState::default()
-        .with_scalar_function(Arc::new(string::concat().as_ref().clone()));
+        .with_scalar_function(Arc::new(string::concat().as_ref().clone()))
+        .with_scalar_function(Arc::new(math::sqrt().as_ref().clone()))
+        .with_aggregate_function(sum::sum_udaf());
     let context = MockContextProvider { state };
     let sql_to_rel = SqlToRel::new_with_options(&context, options);
     match sql_to_rel.statement_to_plan(statement) {
@@ -280,6 +283,40 @@ fn test_invalid_function() -> Result<()> {
     assert_eq!(diag.span, Some(spans["whole"]));
     Ok(())
 }
+
+#[test]
+fn test_invalid_scalar_function_argument_types() -> Result<()> {
+    let query = "SELECT /*call*/sqrt/*call*/('foo')";
+    let spans = get_spans(query);
+    let diag = do_query(query);
+    assert_snapshot!(
+        diag.message,
+        @"Invalid argument types for function 'sqrt'"
+    );
+    assert_eq!(diag.span, Some(spans["call"]));
+    assert!(
+        diag.notes[0]
+            .message
+            .starts_with("No function matches the given name and argument types")
+    );
+    Ok(())
+}
+
+#[test]
+fn test_invalid_aggregate_function_argument_types() -> Result<()> {
+    let query = "SELECT /*call*/sum/*call*/('a')";
+    let spans = get_spans(query);
+    let diag = do_query(query);
+    assert_snapshot!(diag.message, @"Invalid argument types for function 'sum'");
+    assert_eq!(diag.span, Some(spans["call"]));
+    assert!(
+        diag.notes[0]
+            .message
+            .starts_with("No function matches the given name and argument types")
+    );
+    Ok(())
+}
+
 #[test]
 fn test_scalar_subquery_multiple_columns() -> Result<(), Box<dyn std::error::Error>> {
     let query = "SELECT (SELECT 1 AS /*x*/x/*x*/, 2 AS /*y*/y/*y*/) AS col";

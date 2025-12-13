@@ -367,7 +367,7 @@ impl ScalarUDFImpl for PowerFunc {
             Expr::Literal(value, _) if value == ScalarValue::new_one(&exponent_type)? => {
                 Ok(ExprSimplifyResult::Simplified(base))
             }
-            Expr::ScalarFunction(ScalarFunction { func, mut args })
+            Expr::ScalarFunction(ScalarFunction { func, mut args, .. })
                 if is_log(&func) && args.len() == 2 && base == args[0] =>
             {
                 let b = args.pop().unwrap(); // length checked above

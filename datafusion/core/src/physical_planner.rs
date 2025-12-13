@@ -1954,6 +1954,7 @@ pub fn create_aggregate_expr_with_name_and_maybe_filter(
                     order_by,
                     null_treatment,
                 },
+            ..
         }) => {
             let name = if let Some(name) = name {
                 name

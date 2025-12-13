@@ -329,10 +329,7 @@ fn simplify_concat_ws(delimiter: &Expr, args: &[Expr]) -> Result<ExprSimplifyRes
                     match simplify_concat(args.to_vec())? {
                         ExprSimplifyResult::Original(_) => {
                             Ok(ExprSimplifyResult::Simplified(Expr::ScalarFunction(
-                                ScalarFunction {
-                                    func: concat(),
-                                    args: args.to_vec(),
-                                },
+                                ScalarFunction::new_udf(concat(), args.to_vec()),
                             )))
                         }
                         expr => Ok(expr),
@@ -386,10 +383,7 @@ fn simplify_concat_ws(delimiter: &Expr, args: &[Expr]) -> Result<ExprSimplifyRes
                     }
 
                     Ok(ExprSimplifyResult::Simplified(Expr::ScalarFunction(
-                        ScalarFunction {
-                            func: concat_ws(),
-                            args: new_args,
-                        },
+                        ScalarFunction::new_udf(concat_ws(), new_args),
                     )))
                 }
                 // if the delimiter is null, then the value of the whole expression is null.
