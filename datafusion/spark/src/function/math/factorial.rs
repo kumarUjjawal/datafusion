@@ -27,13 +27,23 @@ use datafusion_common::{
 };
 use datafusion_expr::Signature;
 use datafusion_expr::{ColumnarValue, ScalarFunctionArgs, ScalarUDFImpl, Volatility};
+use datafusion_functions::math::factorial::FACTORIALS;
 
-/// <https://spark.apache.org/docs/latest/api/sql/index.html#factorial>
+/// Spark-compatible version of the [factorial] function.
+///
+/// Differs from the [DataFusion factorial function] in the following ways:
+/// - **Input type**: Only accepts `Int32` (Spark requirement), whereas DataFusion accepts `Int64`
+/// - **Out-of-range handling**: Returns `NULL` for values outside 0-20 range, whereas DataFusion
+///   returns 1 for negative values and errors on overflow (values > 20)
+///
+/// [factorial]: https://spark.apache.org/docs/latest/api/sql/index.html#factorial
+/// [DataFusion factorial function]: datafusion_functions::math::factorial::FactorialFunc
 #[derive(Debug, PartialEq, Eq, Hash)]
 pub struct SparkFactorial {
     signature: Signature,
     aliases: Vec<String>,
 }
+
 
 impl Default for SparkFactorial {
     fn default() -> Self {
@@ -75,30 +85,6 @@ impl ScalarUDFImpl for SparkFactorial {
         &self.aliases
     }
 }
-
-const FACTORIALS: [i64; 21] = [
-    1,
-    1,
-    2,
-    6,
-    24,
-    120,
-    720,
-    5040,
-    40320,
-    362880,
-    3628800,
-    39916800,
-    479001600,
-    6227020800,
-    87178291200,
-    1307674368000,
-    20922789888000,
-    355687428096000,
-    6402373705728000,
-    121645100408832000,
-    2432902008176640000,
-];
 
 pub fn spark_factorial(args: &[ColumnarValue]) -> Result<ColumnarValue, DataFusionError> {
     let [arg] = take_function_args("factorial", args)?;

@@ -33,6 +33,33 @@ use datafusion_expr::{
 };
 use datafusion_macros::user_doc;
 
+/// Pre-computed factorial values for integers 0-20.
+/// factorial(n) for n > 20 overflows i64.
+/// This table is shared with the Spark factorial implementation.
+pub const FACTORIALS: [i64; 21] = [
+    1,                    // 0!
+    1,                    // 1!
+    2,                    // 2!
+    6,                    // 3!
+    24,                   // 4!
+    120,                  // 5!
+    720,                  // 6!
+    5040,                 // 7!
+    40320,                // 8!
+    362880,               // 9!
+    3628800,              // 10!
+    39916800,             // 11!
+    479001600,            // 12!
+    6227020800,           // 13!
+    87178291200,          // 14!
+    1307674368000,        // 15!
+    20922789888000,       // 16!
+    355687428096000,      // 17!
+    6402373705728000,     // 18!
+    121645100408832000,   // 19!
+    2432902008176640000,  // 20!
+];
+
 #[user_doc(
     doc_section(label = "Math Functions"),
     description = "Factorial. Returns 1 if value is less than 2.",
@@ -93,22 +120,25 @@ impl ScalarUDFImpl for FactorialFunc {
 }
 
 /// Factorial SQL function
-fn factorial(args: &[ArrayRef]) -> Result<ArrayRef> {
+/// 
+/// Uses the pre-computed `FACTORIALS` lookup table for O(1) performance.
+/// Behavior:
+/// - Values less than 2: returns 1
+/// - Values 2-20: returns factorial from lookup table
+/// - Values > 20: returns overflow error
+pub fn factorial(args: &[ArrayRef]) -> Result<ArrayRef> {
     match args[0].data_type() {
         Int64 => {
             let arg = downcast_named_arg!((&args[0]), "value", Int64Array);
             Ok(arg
                 .iter()
                 .map(|a| match a {
-                    Some(a) => (2..=a)
-                        .try_fold(1i64, i64::checked_mul)
-                        .ok_or_else(|| {
-                            arrow_datafusion_err!(ArrowError::ComputeError(format!(
-                                "Overflow happened on FACTORIAL({a})"
-                            )))
-                        })
-                        .map(Some),
-                    _ => Ok(None),
+                    Some(a) if a < 2 => Ok(Some(1i64)),
+                    Some(a) if a <= 20 => Ok(Some(FACTORIALS[a as usize])),
+                    Some(a) => Err(arrow_datafusion_err!(ArrowError::ComputeError(
+                        format!("Overflow happened on FACTORIAL({a})")
+                    ))),
+                    None => Ok(None),
                 })
                 .collect::<Result<Int64Array>>()
                 .map(Arc::new)? as ArrayRef)
