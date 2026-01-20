@@ -28,13 +28,15 @@ use arrow::{
     record_batch::RecordBatch,
 };
 use async_trait::async_trait;
-use datafusion_common::DataFusionError;
 use datafusion_common::config::{ConfigEntry, ConfigOptions};
 use datafusion_common::error::Result;
 use datafusion_common::types::NativeType;
+use datafusion_common::{DataFusionError, ScalarValue};
 use datafusion_execution::TaskContext;
 use datafusion_execution::runtime_env::RuntimeEnv;
-use datafusion_expr::{AggregateUDF, ScalarUDF, Signature, TypeSignature, WindowUDF};
+use datafusion_expr::{
+    AggregateUDF, ReturnFieldArgs, ScalarUDF, Signature, TypeSignature, WindowUDF,
+};
 use datafusion_expr::{TableType, Volatility};
 use datafusion_physical_plan::SendableRecordBatchStream;
 use datafusion_physical_plan::stream::RecordBatchStreamAdapter;
@@ -421,10 +423,27 @@ fn get_udf_args_and_return_types(
         Ok(arg_types
             .into_iter()
             .map(|arg_types| {
-                // only handle the function which implemented [`ScalarUDFImpl::return_type`] method
+                let arg_fields: Vec<_> = arg_types
+                    .iter()
+                    .enumerate()
+                    .map(|(i, t)| {
+                        Arc::new(Field::new(format!("arg{i}"), t.clone(), true))
+                    })
+                    .collect();
+
+                let scalar_arguments: Vec<Option<&ScalarValue>> =
+                    vec![None; arg_types.len()];
+                let return_field_args = ReturnFieldArgs {
+                    arg_fields: &arg_fields,
+                    scalar_arguments: &scalar_arguments,
+                };
                 let return_type = udf
-                    .return_type(&arg_types)
-                    .map(|t| remove_native_type_prefix(&NativeType::from(t)))
+                    .return_field_from_args(return_field_args)
+                    .map(|f| {
+                        remove_native_type_prefix(&NativeType::from(
+                            f.data_type().clone(),
+                        ))
+                    })
                     .ok();
                 let arg_types = arg_types
                     .into_iter()
@@ -447,11 +466,16 @@ fn get_udaf_args_and_return_types(
         Ok(arg_types
             .into_iter()
             .map(|arg_types| {
-                // only handle the function which implemented [`ScalarUDFImpl::return_type`] method
-                let return_type = udaf
-                    .return_type(&arg_types)
-                    .ok()
-                    .map(|t| remove_native_type_prefix(&NativeType::from(t)));
+                let arg_fields: Vec<_> = arg_types
+                    .iter()
+                    .enumerate()
+                    .map(|(i, t)| {
+                        Arc::new(Field::new(format!("arg{i}"), t.clone(), true))
+                    })
+                    .collect();
+                let return_type = udaf.return_field(&arg_fields).ok().map(|f| {
+                    remove_native_type_prefix(&NativeType::from(f.data_type().clone()))
+                });
                 let arg_types = arg_types
                     .into_iter()
                     .map(|t| remove_native_type_prefix(&NativeType::from(t)))
