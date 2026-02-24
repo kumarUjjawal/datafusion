@@ -33,7 +33,6 @@ use substrait::proto::expression::MaskExpression;
 use substrait::proto::read_rel::ReadType;
 use substrait::proto::read_rel::local_files::file_or_files::PathType;
 use substrait::proto::{Expression, ReadRel};
-use url::Url;
 
 #[expect(deprecated)]
 pub async fn from_read_rel(
@@ -176,44 +175,29 @@ pub async fn from_read_rel(
             }))
         }
         Some(ReadType::LocalFiles(lf)) => {
-            /// Extracts the path string from a PathType variant.
-            /// Normalizes file:// URLs to file:/// format for proper URL parsing.
-            fn extract_path(path_type: Option<&PathType>) -> Option<String> {
-                let path_str = match path_type? {
-                    PathType::UriPath(p) => p.clone(),
-                    PathType::UriPathGlob(p) => p.clone(),
-                    PathType::UriFile(p) => p.clone(),
-                    PathType::UriFolder(p) => p.clone(),
-                };
-
-                // Normalize file:// to file:/// for proper URL parsing
-                let normalized = if path_str.starts_with("file://")
-                    && !path_str.starts_with("file:///")
-                {
-                    path_str.replacen("file://", "file:///", 1)
-                } else {
-                    path_str
-                };
-
-                // Parse URL and extract the file system path component
-                Url::parse(&normalized)
-                    .ok()
-                    .map(|url| url.path().to_string())
+            /// Extracts the URI string from a PathType variant.
+            fn extract_uri(path_type: Option<&PathType>) -> Option<String> {
+                match path_type? {
+                    PathType::UriPath(p) => Some(p.clone()),
+                    PathType::UriPathGlob(p) => Some(p.clone()),
+                    PathType::UriFile(p) => Some(p.clone()),
+                    PathType::UriFolder(p) => Some(p.clone()),
+                }
             }
 
-            // Collect all file paths from LocalFiles items
-            let paths: Vec<String> = lf
+            // Collect all file URIs from LocalFiles items
+            let uris: Vec<String> = lf
                 .items
                 .iter()
-                .filter_map(|item| extract_path(item.path_type.as_ref()))
+                .filter_map(|item| extract_uri(item.path_type.as_ref()))
                 .collect();
 
-            if paths.is_empty() {
-                return plan_err!("No valid file paths found in LocalFiles");
+            if uris.is_empty() {
+                return plan_err!("No valid file URIs found in LocalFiles");
             }
 
-            // Generate a table name from the first file path
-            let table_name = std::path::Path::new(&paths[0])
+            // Generate a table name from the first URI
+            let table_name = std::path::Path::new(&uris[0])
                 .file_name()
                 .map(|n| n.to_string_lossy().to_string())
                 .unwrap_or_else(|| "local_files".to_string());
@@ -226,7 +210,7 @@ pub async fn from_read_rel(
             // If not implemented, fall back to the legacy single-file behavior
             // for backward compatibility.
             let provider = match consumer
-                .resolve_local_files(&paths, &substrait_schema)
+                .resolve_local_files(&uris, &substrait_schema)
                 .await
             {
                 Ok(provider) => provider,
@@ -237,10 +221,9 @@ pub async fn from_read_rel(
                         Some(provider) => provider,
                         None => {
                             return plan_err!(
-                                "No table named '{}' found. \
+                                "No table named '{table_name}' found. \
                                  To support LocalFiles with multiple files or custom file resolution, \
-                                 implement the resolve_local_files method on your SubstraitConsumer.",
-                                table_name
+                                 implement the resolve_local_files method on your SubstraitConsumer."
                             );
                         }
                     }

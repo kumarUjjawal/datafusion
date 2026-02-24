@@ -164,7 +164,7 @@ impl SubstraitConsumer for LocalFilesConsumer {
 
     async fn resolve_local_files(
         &self,
-        _paths: &[String],
+        _uris: &[String],
         _schema: &DFSchema,
     ) -> Result<Arc<dyn TableProvider>> {
         // Return the pre-configured table
@@ -352,11 +352,11 @@ async fn test_local_files_no_valid_paths() -> Result<()> {
     // This should fail because there are no valid paths
     let result = from_substrait_plan(&ctx.state(), &plan).await;
 
-    assert!(result.is_err(), "Should fail with no valid paths");
+    assert!(result.is_err(), "Should fail with no valid URIs");
     let err_msg = result.unwrap_err().to_string();
     assert!(
-        err_msg.contains("No valid file paths"),
-        "Error should mention no valid paths: {err_msg}",
+        err_msg.contains("No valid file URIs"),
+        "Error should mention no valid URIs: {err_msg}",
     );
 
     Ok(())
