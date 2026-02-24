@@ -124,7 +124,7 @@ fn create_local_files_plan(file_paths: Vec<(PathType, String)>) -> Plan {
         })),
     };
 
-    #[allow(deprecated)]
+    #[expect(deprecated)]
     Plan {
         version: None,
         extension_uris: vec![],
@@ -327,7 +327,7 @@ async fn test_local_files_no_valid_paths() -> Result<()> {
         })),
     };
 
-    #[allow(deprecated)]
+    #[expect(deprecated)]
     let plan = Plan {
         version: None,
         extension_uris: vec![],
