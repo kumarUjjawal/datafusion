@@ -33,6 +33,7 @@ use substrait::proto::expression::MaskExpression;
 use substrait::proto::read_rel::ReadType;
 use substrait::proto::read_rel::local_files::file_or_files::PathType;
 use substrait::proto::{Expression, ReadRel};
+use url::Url;
 
 #[expect(deprecated)]
 pub async fn from_read_rel(
@@ -175,29 +176,42 @@ pub async fn from_read_rel(
             }))
         }
         Some(ReadType::LocalFiles(lf)) => {
-            /// Extracts the URI string from a PathType variant.
-            fn extract_uri(path_type: Option<&PathType>) -> Option<String> {
-                match path_type? {
-                    PathType::UriPath(p) => Some(p.clone()),
-                    PathType::UriPathGlob(p) => Some(p.clone()),
-                    PathType::UriFile(p) => Some(p.clone()),
-                    PathType::UriFolder(p) => Some(p.clone()),
-                }
+            /// Parses the URI string from a PathType variant.
+            /// Returns an error if the URI is malformed.
+            fn parse_uri(
+                path_type: Option<&PathType>,
+            ) -> datafusion::common::Result<Option<Url>> {
+                let path_str = match path_type {
+                    Some(PathType::UriPath(p)) => p,
+                    Some(PathType::UriPathGlob(p)) => p,
+                    Some(PathType::UriFile(p)) => p,
+                    Some(PathType::UriFolder(p)) => p,
+                    None => return Ok(None),
+                };
+
+                Url::parse(path_str).map(Some).map_err(|e| {
+                    datafusion::error::DataFusionError::Substrait(format!(
+                        "Failed to parse URI '{path_str}': {e}"
+                    ))
+                })
             }
 
             // Collect all file URIs from LocalFiles items
-            let uris: Vec<String> = lf
+            let uris: Vec<Url> = lf
                 .items
                 .iter()
-                .filter_map(|item| extract_uri(item.path_type.as_ref()))
+                .map(|item| parse_uri(item.path_type.as_ref()))
+                .collect::<datafusion::common::Result<Vec<_>>>()?
+                .into_iter()
+                .flatten()
                 .collect();
 
             if uris.is_empty() {
                 return plan_err!("No valid file URIs found in LocalFiles");
             }
 
-            // Generate a table name from the first URI
-            let table_name = std::path::Path::new(&uris[0])
+            // Generate a table name from the first URI's path component
+            let table_name = std::path::Path::new(uris[0].path())
                 .file_name()
                 .map(|n| n.to_string_lossy().to_string())
                 .unwrap_or_else(|| "local_files".to_string());

@@ -164,7 +164,7 @@ impl SubstraitConsumer for LocalFilesConsumer {
 
     async fn resolve_local_files(
         &self,
-        _uris: &[String],
+        _uris: &[url::Url],
         _schema: &DFSchema,
     ) -> Result<Arc<dyn TableProvider>> {
         // Return the pre-configured table

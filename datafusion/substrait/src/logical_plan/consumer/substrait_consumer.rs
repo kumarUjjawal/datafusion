@@ -159,21 +159,20 @@ pub trait SubstraitConsumer: Send + Sync + Sized {
     /// Resolves a list of local file URIs to a TableProvider.
     ///
     /// Override this method to customize how file URIs from Substrait LocalFiles
-    /// are resolved to table providers. The URIs are passed as raw strings
-    /// exactly as they appear in the Substrait plan. They may or may not include
-    /// a scheme (e.g., `file:///`, `s3://`, `hdfs://`); the consumer is
-    /// responsible for parsing them appropriately.
+    /// are resolved to table providers. The URIs preserve the full scheme (e.g.,
+    /// `file:///`, `s3://`, `hdfs://`) so implementations can determine how to
+    /// access the files.
     ///
     /// The default implementation returns an error since resolving arbitrary
     /// file URIs requires access to an object store or file system which may
     /// not be available in all contexts.
     ///
     /// # Arguments
-    /// * `uris` - List of file URI strings from Substrait LocalFiles
+    /// * `uris` - List of parsed file URIs from Substrait LocalFiles
     /// * `schema` - The expected schema of the files
     async fn resolve_local_files(
         &self,
-        _uris: &[String],
+        _uris: &[url::Url],
         _schema: &DFSchema,
     ) -> datafusion::common::Result<Arc<dyn TableProvider>> {
         not_impl_err!(
