@@ -87,9 +87,9 @@ fn validate_decimal_precision<T: DecimalType>(
     precision: u8,
     scale: i8,
 ) -> Result<T::Native, ArrowError> {
-    T::validate_decimal_precision(value, precision, scale).map_err(|_| {
+    T::validate_decimal_precision(value, precision, scale).map_err(|e| {
         ArrowError::ComputeError(format!(
-            "Decimal overflow: rounded value exceeds precision {precision}"
+            "Decimal overflow: rounded value exceeds precision {precision}: {e}"
         ))
     })?;
     Ok(value)
@@ -240,7 +240,7 @@ impl ScalarUDFImpl for RoundFunc {
         let decimal_places: Option<i32> = match args.scalar_arguments.get(1) {
             None => Some(0),    // No dp argument means default to 0
             Some(None) => None, // dp is not a literal (e.g. column)
-            Some(Some(scalar)) if scalar.is_null() => Some(0), // null dp => output is null
+            Some(Some(scalar)) if scalar.is_null() => Some(0), // null dp => default to 0
             Some(Some(scalar)) => Some(decimal_places_from_scalar(scalar)?),
         };
 
