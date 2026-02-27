@@ -86,33 +86,27 @@ pub(crate) fn to_substrait_precision(time_unit: &TimeUnit) -> i32 {
     }
 }
 
-/// Wraps an expression with a `not()` function if `negated` is true.
-/// This is used for negated IN, EXISTS, and other predicates.
-pub(crate) fn negate_if_needed(
+/// Wraps an expression with a `not()` function.
+pub(crate) fn negate(
     producer: &mut impl SubstraitProducer,
     expr: Expression,
-    negated: bool,
 ) -> Expression {
-    if negated {
-        let function_anchor = producer.register_function("not".to_string());
+    let function_anchor = producer.register_function("not".to_string());
 
-        #[expect(deprecated)]
-        Expression {
-            rex_type: Some(substrait::proto::expression::RexType::ScalarFunction(
-                substrait::proto::expression::ScalarFunction {
-                    function_reference: function_anchor,
-                    arguments: vec![substrait::proto::FunctionArgument {
-                        arg_type: Some(
-                            substrait::proto::function_argument::ArgType::Value(expr),
-                        ),
-                    }],
-                    output_type: None,
-                    args: vec![],
-                    options: vec![],
-                },
-            )),
-        }
-    } else {
-        expr
+    #[expect(deprecated)]
+    Expression {
+        rex_type: Some(substrait::proto::expression::RexType::ScalarFunction(
+            substrait::proto::expression::ScalarFunction {
+                function_reference: function_anchor,
+                arguments: vec![substrait::proto::FunctionArgument {
+                    arg_type: Some(substrait::proto::function_argument::ArgType::Value(
+                        expr,
+                    )),
+                }],
+                output_type: None,
+                args: vec![],
+                options: vec![],
+            },
+        )),
     }
 }

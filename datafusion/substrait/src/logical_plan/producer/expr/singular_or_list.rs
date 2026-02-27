@@ -15,7 +15,7 @@
 // specific language governing permissions and limitations
 // under the License.
 
-use crate::logical_plan::producer::{SubstraitProducer, negate_if_needed};
+use crate::logical_plan::producer::{SubstraitProducer, negate};
 use datafusion::common::DFSchemaRef;
 use datafusion::logical_expr::expr::InList;
 use substrait::proto::Expression;
@@ -44,5 +44,9 @@ pub fn from_in_list(
         }))),
     };
 
-    Ok(negate_if_needed(producer, substrait_or_list, *negated))
+    if *negated {
+        Ok(negate(producer, substrait_or_list))
+    } else {
+        Ok(substrait_or_list)
+    }
 }

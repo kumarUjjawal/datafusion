@@ -15,7 +15,7 @@
 // specific language governing permissions and limitations
 // under the License.
 
-use crate::logical_plan::producer::{SubstraitProducer, negate_if_needed};
+use crate::logical_plan::producer::{SubstraitProducer, negate};
 use datafusion::common::{DFSchemaRef, substrait_err};
 use datafusion::logical_expr::expr::{Exists, InSubquery, SetComparison, SetQuantifier};
 use datafusion::logical_expr::{Operator, Subquery};
@@ -52,7 +52,11 @@ pub fn from_in_subquery(
             },
         ))),
     };
-    Ok(negate_if_needed(producer, substrait_subquery, *negated))
+    if *negated {
+        Ok(negate(producer, substrait_subquery))
+    } else {
+        Ok(substrait_subquery)
+    }
 }
 
 fn comparison_op_to_proto(op: &Operator) -> datafusion::common::Result<ComparisonOp> {
@@ -151,5 +155,9 @@ pub fn from_exists(
         ))),
     };
 
-    Ok(negate_if_needed(producer, substrait_exists, exists.negated))
+    if exists.negated {
+        Ok(negate(producer, substrait_exists))
+    } else {
+        Ok(substrait_exists)
+    }
 }
