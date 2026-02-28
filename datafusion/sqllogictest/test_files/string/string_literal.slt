@@ -835,6 +835,21 @@ SELECT split_part('foo_bar', '_', 2)
 bar
 
 query T
+SELECT arrow_typeof(split_part('foo_bar', '_', 2))
+----
+Utf8
+
+query T
+SELECT arrow_typeof(split_part(arrow_cast('large_apple_large_orange_large_banana', 'LargeUtf8'), '_', 3))
+----
+LargeUtf8
+
+query T
+SELECT arrow_typeof(split_part(arrow_cast('view_apple_view_orange_view_banana', 'Utf8View'), '_', 3))
+----
+Utf8View
+
+query T
 SELECT split_part(arrow_cast('foo_bar', 'Dictionary(Int32, Utf8)'), '_', 2)
 ----
 bar

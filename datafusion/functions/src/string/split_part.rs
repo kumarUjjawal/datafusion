@@ -17,8 +17,8 @@
 
 use crate::utils::utf8_to_str_type;
 use arrow::array::{
-    ArrayRef, GenericStringArray, Int64Array, OffsetSizeTrait, StringArrayType,
-    StringViewArray,
+    Array, ArrayRef, GenericStringArray, Int64Array, OffsetSizeTrait, StringArrayType,
+    StringViewArray, StringViewBuilder,
 };
 use arrow::array::{AsArray, GenericStringBuilder};
 use arrow::datatypes::DataType;
@@ -97,7 +97,11 @@ impl ScalarUDFImpl for SplitPartFunc {
     }
 
     fn return_type(&self, arg_types: &[DataType]) -> Result<DataType> {
-        utf8_to_str_type(&arg_types[0], "split_part")
+        if arg_types[0] == DataType::Utf8View {
+            Ok(DataType::Utf8View)
+        } else {
+            utf8_to_str_type(&arg_types[0], "split_part")
+        }
     }
 
     fn invoke_with_args(&self, args: ScalarFunctionArgs) -> Result<ColumnarValue> {
@@ -125,21 +129,21 @@ impl ScalarUDFImpl for SplitPartFunc {
         let n_array = as_int64_array(&args[2])?;
         let result = match (args[0].data_type(), args[1].data_type()) {
             (DataType::Utf8View, DataType::Utf8View) => {
-                split_part_impl::<&StringViewArray, &StringViewArray, i32>(
+                split_part_view_impl::<&StringViewArray>(
                     &args[0].as_string_view(),
                     &args[1].as_string_view(),
                     n_array,
                 )
             }
             (DataType::Utf8View, DataType::Utf8) => {
-                split_part_impl::<&StringViewArray, &GenericStringArray<i32>, i32>(
+                split_part_view_impl::<&GenericStringArray<i32>>(
                     &args[0].as_string_view(),
                     &args[1].as_string::<i32>(),
                     n_array,
                 )
             }
             (DataType::Utf8View, DataType::LargeUtf8) => {
-                split_part_impl::<&StringViewArray, &GenericStringArray<i64>, i32>(
+                split_part_view_impl::<&GenericStringArray<i64>>(
                     &args[0].as_string_view(),
                     &args[1].as_string::<i64>(),
                     n_array,
@@ -203,6 +207,81 @@ impl ScalarUDFImpl for SplitPartFunc {
     }
 }
 
+fn split_part_value<'a>(
+    string: &'a str,
+    delimiter: &str,
+    n: i64,
+) -> Result<Option<&'a str>, DataFusionError> {
+    match n.cmp(&0) {
+        std::cmp::Ordering::Greater => {
+            // Positive index: use nth() to avoid collecting all parts
+            // This stops iteration as soon as we find the nth element
+            let idx: usize = (n - 1).try_into().map_err(|_| {
+                exec_datafusion_err!(
+                    "split_part index {n} exceeds maximum supported value"
+                )
+            })?;
+
+            if delimiter.is_empty() {
+                // Match PostgreSQL split_part behavior for empty delimiter:
+                // treat the input as a single field ("ab" -> ["ab"]),
+                // rather than Rust's split("") result (["", "a", "b", ""]).
+                Ok((n == 1).then_some(string))
+            } else {
+                Ok(string.split(delimiter).nth(idx))
+            }
+        }
+        std::cmp::Ordering::Less => {
+            // Negative index: use rsplit().nth() to efficiently get from the end
+            // rsplit iterates in reverse, so -1 means first from rsplit (index 0)
+            let idx: usize = (n.unsigned_abs() - 1).try_into().map_err(|_| {
+                exec_datafusion_err!(
+                    "split_part index {n} exceeds minimum supported value"
+                )
+            })?;
+            if delimiter.is_empty() {
+                // Match PostgreSQL split_part behavior for empty delimiter:
+                // treat the input as a single field ("ab" -> ["ab"]),
+                // rather than Rust's split("") result (["", "a", "b", ""]).
+                Ok((n == -1).then_some(string))
+            } else {
+                Ok(string.rsplit(delimiter).nth(idx))
+            }
+        }
+        std::cmp::Ordering::Equal => {
+            exec_err!("field position must not be zero")
+        }
+    }
+}
+
+fn split_part_view_impl<'a, DelimiterArrType>(
+    string_array: &StringViewArray,
+    delimiter_array: &DelimiterArrType,
+    n_array: &Int64Array,
+) -> Result<ArrayRef>
+where
+    DelimiterArrType: StringArrayType<'a>,
+{
+    let mut builder = StringViewBuilder::with_capacity(string_array.len());
+
+    string_array
+        .iter()
+        .zip(delimiter_array.iter())
+        .zip(n_array.iter())
+        .try_for_each(|((string, delimiter), n)| -> Result<(), DataFusionError> {
+            match (string, delimiter, n) {
+                (Some(string), Some(delimiter), Some(n)) => {
+                    let result = split_part_value(string, delimiter, n)?;
+                    builder.append_value(result.unwrap_or(""));
+                }
+                _ => builder.append_null(),
+            }
+            Ok(())
+        })?;
+
+    Ok(Arc::new(builder.finish()) as ArrayRef)
+}
+
 fn split_part_impl<'a, StringArrType, DelimiterArrType, StringArrayLen>(
     string_array: &StringArrType,
     delimiter_array: &DelimiterArrType,
@@ -222,46 +301,7 @@ where
         .try_for_each(|((string, delimiter), n)| -> Result<(), DataFusionError> {
             match (string, delimiter, n) {
                 (Some(string), Some(delimiter), Some(n)) => {
-                    let result = match n.cmp(&0) {
-                        std::cmp::Ordering::Greater => {
-                            // Positive index: use nth() to avoid collecting all parts
-                            // This stops iteration as soon as we find the nth element
-                            let idx: usize = (n - 1).try_into().map_err(|_| {
-                                exec_datafusion_err!(
-                                    "split_part index {n} exceeds maximum supported value"
-                                )
-                            })?;
-
-                            if delimiter.is_empty() {
-                                // Match PostgreSQL split_part behavior for empty delimiter:
-                                // treat the input as a single field ("ab" -> ["ab"]),
-                                // rather than Rust's split("") result (["", "a", "b", ""]).
-                                (n == 1).then_some(string)
-                            } else {
-                                string.split(delimiter).nth(idx)
-                            }
-                        }
-                        std::cmp::Ordering::Less => {
-                            // Negative index: use rsplit().nth() to efficiently get from the end
-                            // rsplit iterates in reverse, so -1 means first from rsplit (index 0)
-                            let idx: usize = (n.unsigned_abs() - 1).try_into().map_err(|_| {
-                                exec_datafusion_err!(
-                                    "split_part index {n} exceeds minimum supported value"
-                                )
-                            })?;
-                            if delimiter.is_empty() {
-                                // Match PostgreSQL split_part behavior for empty delimiter:
-                                // treat the input as a single field ("ab" -> ["ab"]),
-                                // rather than Rust's split("") result (["", "a", "b", ""]).
-                                (n == -1).then_some(string)
-                            } else {
-                                string.rsplit(delimiter).nth(idx)
-                            }
-                        }
-                        std::cmp::Ordering::Equal => {
-                            return exec_err!("field position must not be zero");
-                        }
-                    };
+                    let result = split_part_value(string, delimiter, n)?;
                     builder.append_value(result.unwrap_or(""));
                 }
                 _ => builder.append_null(),
@@ -274,8 +314,8 @@ where
 
 #[cfg(test)]
 mod tests {
-    use arrow::array::{Array, StringArray};
-    use arrow::datatypes::DataType::Utf8;
+    use arrow::array::{Array, StringArray, StringViewArray};
+    use arrow::datatypes::DataType::{Utf8, Utf8View};
 
     use datafusion_common::ScalarValue;
     use datafusion_common::{Result, exec_err};
@@ -466,6 +506,20 @@ mod tests {
             &str,
             Utf8,
             StringArray
+        );
+        test_function!(
+            SplitPartFunc::new(),
+            vec![
+                ColumnarValue::Scalar(ScalarValue::Utf8View(Some(String::from(
+                    "foo_bar"
+                )))),
+                ColumnarValue::Scalar(ScalarValue::Utf8View(Some(String::from("_")))),
+                ColumnarValue::Scalar(ScalarValue::Int64(Some(2))),
+            ],
+            Ok(Some("bar")),
+            &str,
+            Utf8View,
+            StringViewArray
         );
 
         Ok(())
