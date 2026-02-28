@@ -516,6 +516,21 @@ SELECT lower(arrow_cast('ÁRVORE AÇÃO ΑΒΓ', 'Dictionary(Int32, Utf8)'))
 árvore ação αβγ
 
 query T
+SELECT arrow_typeof(lower('FOObar'))
+----
+Utf8
+
+query T
+SELECT arrow_typeof(lower(arrow_cast('FOObar', 'LargeUtf8')))
+----
+LargeUtf8
+
+query T
+SELECT arrow_typeof(lower(arrow_cast('FOObar', 'Utf8View')))
+----
+Utf8View
+
+query T
 SELECT ltrim('   foo')
 ----
 foo
