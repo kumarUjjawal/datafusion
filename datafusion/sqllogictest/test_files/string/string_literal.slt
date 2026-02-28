@@ -439,6 +439,21 @@ SELECT reverse(arrow_cast(NULL, 'Utf8View'))
 ----
 NULL
 
+query T
+SELECT arrow_typeof(reverse('abcde'))
+----
+Utf8
+
+query T
+SELECT arrow_typeof(reverse(arrow_cast('abcde', 'LargeUtf8')))
+----
+LargeUtf8
+
+query T
+SELECT arrow_typeof(reverse(arrow_cast('abcde', 'Utf8View')))
+----
+Utf8View
+
 
 query I
 SELECT strpos('abc', 'c')

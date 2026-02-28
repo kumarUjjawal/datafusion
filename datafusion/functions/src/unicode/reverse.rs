@@ -21,7 +21,8 @@ use std::sync::Arc;
 use crate::utils::{make_scalar_function, utf8_to_str_type};
 use DataType::{LargeUtf8, Utf8, Utf8View};
 use arrow::array::{
-    Array, ArrayRef, AsArray, GenericStringBuilder, OffsetSizeTrait, StringArrayType,
+    ArrayRef, AsArray, GenericStringBuilder, OffsetSizeTrait, StringArrayType,
+    StringViewArray, StringViewBuilder,
 };
 use arrow::datatypes::DataType;
 use datafusion_common::{Result, exec_err};
@@ -82,7 +83,11 @@ impl ScalarUDFImpl for ReverseFunc {
     }
 
     fn return_type(&self, arg_types: &[DataType]) -> Result<DataType> {
-        utf8_to_str_type(&arg_types[0], "reverse")
+        if arg_types[0] == Utf8View {
+            Ok(Utf8View)
+        } else {
+            utf8_to_str_type(&arg_types[0], "reverse")
+        }
     }
 
     fn invoke_with_args(
@@ -91,8 +96,9 @@ impl ScalarUDFImpl for ReverseFunc {
     ) -> Result<ColumnarValue> {
         let args = &args.args;
         match args[0].data_type() {
-            Utf8 | Utf8View => make_scalar_function(reverse::<i32>, vec![])(args),
+            Utf8 => make_scalar_function(reverse::<i32>, vec![])(args),
             LargeUtf8 => make_scalar_function(reverse::<i64>, vec![])(args),
+            Utf8View => make_scalar_function(reverse_view, vec![])(args),
             other => {
                 exec_err!("Unsupported data type {other:?} for function reverse")
             }
@@ -107,11 +113,11 @@ impl ScalarUDFImpl for ReverseFunc {
 /// Reverses the order of the characters in the string `reverse('abcde') = 'edcba'`.
 /// The implementation uses UTF-8 code points as characters
 fn reverse<T: OffsetSizeTrait>(args: &[ArrayRef]) -> Result<ArrayRef> {
-    if args[0].data_type() == &Utf8View {
-        reverse_impl::<T, _>(&args[0].as_string_view())
-    } else {
-        reverse_impl::<T, _>(&args[0].as_string::<T>())
-    }
+    reverse_impl::<T, _>(&args[0].as_string::<T>())
+}
+
+fn reverse_view(args: &[ArrayRef]) -> Result<ArrayRef> {
+    reverse_view_impl(&args[0].as_string_view())
 }
 
 fn reverse_impl<'a, T: OffsetSizeTrait, V: StringArrayType<'a>>(
@@ -144,10 +150,38 @@ fn reverse_impl<'a, T: OffsetSizeTrait, V: StringArrayType<'a>>(
     Ok(Arc::new(builder.finish()) as ArrayRef)
 }
 
+fn reverse_view_impl(string_array: &StringViewArray) -> Result<ArrayRef> {
+    let mut builder = StringViewBuilder::new();
+
+    let mut string_buf = String::new();
+    let mut byte_buf = Vec::<u8>::new();
+    for string in string_array.iter() {
+        if let Some(s) = string {
+            if s.is_ascii() {
+                // reverse bytes directly since ASCII characters are single bytes
+                byte_buf.extend(s.as_bytes());
+                byte_buf.reverse();
+                // SAFETY: Since the original string was ASCII, reversing the bytes still results in valid UTF-8.
+                let reversed = unsafe { std::str::from_utf8_unchecked(&byte_buf) };
+                builder.append_value(reversed);
+                byte_buf.clear();
+            } else {
+                string_buf.extend(s.chars().rev());
+                builder.append_value(&string_buf);
+                string_buf.clear();
+            }
+        } else {
+            builder.append_null();
+        }
+    }
+
+    Ok(Arc::new(builder.finish()) as ArrayRef)
+}
+
 #[cfg(test)]
 mod tests {
-    use arrow::array::{Array, LargeStringArray, StringArray};
-    use arrow::datatypes::DataType::{LargeUtf8, Utf8};
+    use arrow::array::{Array, LargeStringArray, StringArray, StringViewArray};
+    use arrow::datatypes::DataType::{LargeUtf8, Utf8, Utf8View};
 
     use datafusion_common::{Result, ScalarValue};
     use datafusion_expr::{ColumnarValue, ScalarUDFImpl};
@@ -180,8 +214,8 @@ mod tests {
                 vec![ColumnarValue::Scalar(ScalarValue::Utf8View($INPUT))],
                 $EXPECTED,
                 &str,
-                Utf8,
-                StringArray
+                Utf8View,
+                StringViewArray
             );
         };
     }
