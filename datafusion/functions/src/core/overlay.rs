@@ -19,6 +19,7 @@ use std::any::Any;
 use std::sync::Arc;
 
 use arrow::array::{ArrayRef, GenericStringArray, OffsetSizeTrait};
+use arrow::compute::kernels::cast::cast;
 use arrow::datatypes::DataType;
 
 use crate::utils::{make_scalar_function, utf8_to_str_type};
@@ -97,7 +98,11 @@ impl ScalarUDFImpl for OverlayFunc {
     }
 
     fn return_type(&self, arg_types: &[DataType]) -> Result<DataType> {
-        utf8_to_str_type(&arg_types[0], "overlay")
+        if arg_types[0] == DataType::Utf8View {
+            Ok(DataType::Utf8View)
+        } else {
+            utf8_to_str_type(&arg_types[0], "overlay")
+        }
     }
 
     fn invoke_with_args(&self, args: ScalarFunctionArgs) -> Result<ColumnarValue> {
@@ -235,7 +240,8 @@ fn string_view_overlay<T: OffsetSizeTrait>(args: &[ArrayRef]) -> Result<ArrayRef
             let pos_num = as_int64_array(&args[2])?;
 
             let result = process_overlay!(string_array, characters_array, pos_num)?;
-            Ok(Arc::new(result) as ArrayRef)
+            let result = Arc::new(result) as ArrayRef;
+            Ok(cast(&result, &DataType::Utf8View)?)
         }
         4 => {
             let string_array = as_string_view_array(&args[0])?;
@@ -245,7 +251,8 @@ fn string_view_overlay<T: OffsetSizeTrait>(args: &[ArrayRef]) -> Result<ArrayRef
 
             let result =
                 process_overlay!(string_array, characters_array, pos_num, len_num)?;
-            Ok(Arc::new(result) as ArrayRef)
+            let result = Arc::new(result) as ArrayRef;
+            Ok(cast(&result, &DataType::Utf8View)?)
         }
         other => {
             exec_err!("overlay was called with {other} arguments. It requires 3 or 4.")
@@ -255,7 +262,7 @@ fn string_view_overlay<T: OffsetSizeTrait>(args: &[ArrayRef]) -> Result<ArrayRef
 
 #[cfg(test)]
 mod tests {
-    use arrow::array::{Int64Array, StringArray};
+    use arrow::array::{Int64Array, StringArray, StringViewArray};
 
     use super::*;
 
@@ -271,6 +278,29 @@ mod tests {
         let res = overlay::<i32>(&[string, replace_string, start, end]).unwrap();
         let result = as_generic_string_array::<i32>(&res).unwrap();
         let expected = StringArray::from(vec!["abc", "qwertyasdfg", "ijkz", "Thomas"]);
+        assert_eq!(&expected, result);
+
+        Ok(())
+    }
+
+    #[test]
+    fn to_overlay_utf8view() -> Result<()> {
+        let string = Arc::new(StringViewArray::from(vec![
+            "123", "abcdefg", "xyz", "Txxxxas",
+        ]));
+        let replace_string = Arc::new(StringViewArray::from(vec![
+            "abc",
+            "qwertyasdfg",
+            "ijk",
+            "hom",
+        ]));
+        let start = Arc::new(Int64Array::from(vec![4, 1, 1, 2])); // start
+        let end = Arc::new(Int64Array::from(vec![5, 7, 2, 4])); // replace len
+
+        let res = overlay::<i32>(&[string, replace_string, start, end]).unwrap();
+        let result = as_string_view_array(&res).unwrap();
+        let expected =
+            StringViewArray::from(vec!["abc", "qwertyasdfg", "ijkz", "Thomas"]);
         assert_eq!(&expected, result);
 
         Ok(())
