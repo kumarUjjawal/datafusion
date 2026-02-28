@@ -18,7 +18,7 @@
 use std::any::Any;
 use std::sync::Arc;
 
-use arrow::array::{ArrayRef, GenericStringBuilder, OffsetSizeTrait};
+use arrow::array::{ArrayRef, GenericStringBuilder, OffsetSizeTrait, StringViewBuilder};
 use arrow::datatypes::DataType;
 
 use crate::utils::{make_scalar_function, utf8_to_str_type};
@@ -99,7 +99,11 @@ impl ScalarUDFImpl for ReplaceFunc {
                     .and_then(|dt| binary_to_string_coercion(&dt, &arg_types[2]))
             })
         {
-            utf8_to_str_type(&coercion_data_type, "replace")
+            if coercion_data_type == DataType::Utf8View {
+                Ok(DataType::Utf8View)
+            } else {
+                utf8_to_str_type(&coercion_data_type, "replace")
+            }
         } else {
             exec_err!(
                 "Unsupported data types for replace. Expected Utf8, LargeUtf8 or Utf8View"
@@ -165,7 +169,7 @@ fn replace_view(args: &[ArrayRef]) -> Result<ArrayRef> {
     let from_array = as_string_view_array(&args[1])?;
     let to_array = as_string_view_array(&args[2])?;
 
-    let mut builder = GenericStringBuilder::<i32>::new();
+    let mut builder = StringViewBuilder::new();
     let mut buffer = String::new();
 
     for ((string, from), to) in string_array
@@ -259,10 +263,8 @@ fn replace_into_string(buffer: &mut String, string: &str, from: &str, to: &str) 
 mod tests {
     use super::*;
     use crate::utils::test::test_function;
-    use arrow::array::Array;
-    use arrow::array::LargeStringArray;
-    use arrow::array::StringArray;
-    use arrow::datatypes::DataType::{LargeUtf8, Utf8};
+    use arrow::array::{Array, LargeStringArray, StringArray, StringViewArray};
+    use arrow::datatypes::DataType::{LargeUtf8, Utf8, Utf8View};
     use datafusion_common::ScalarValue;
     #[test]
     fn test_functions() -> Result<()> {
@@ -305,8 +307,8 @@ mod tests {
             ],
             Ok(Some("aaccbcw")),
             &str,
-            Utf8,
-            StringArray
+            Utf8View,
+            StringViewArray
         );
 
         Ok(())
