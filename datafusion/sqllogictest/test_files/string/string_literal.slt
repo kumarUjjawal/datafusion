@@ -570,6 +570,21 @@ SELECT rpad(arrow_cast('hi', 'Utf8View'), 5, arrow_cast('xy', 'Utf8View'))
 hixyx
 
 query T
+SELECT arrow_typeof(rpad('hi', 5, 'xy'))
+----
+Utf8
+
+query T
+SELECT arrow_typeof(rpad(arrow_cast('hi', 'LargeUtf8'), 5, arrow_cast('xy', 'LargeUtf8')))
+----
+LargeUtf8
+
+query T
+SELECT arrow_typeof(rpad(arrow_cast('hi', 'Utf8View'), 5, arrow_cast('xy', 'Utf8View')))
+----
+Utf8View
+
+query T
 SELECT rpad(arrow_cast(NULL, 'Utf8View'), 5, 'xy')
 ----
 NULL

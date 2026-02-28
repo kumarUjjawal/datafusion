@@ -21,6 +21,7 @@ use arrow::array::{
     ArrayRef, AsArray, GenericStringArray, GenericStringBuilder, Int64Array,
     OffsetSizeTrait, StringArrayType, StringViewArray,
 };
+use arrow::compute::kernels::cast::cast;
 use arrow::datatypes::DataType;
 use datafusion_common::DataFusionError;
 use datafusion_common::cast::as_int64_array;
@@ -108,7 +109,11 @@ impl ScalarUDFImpl for RPadFunc {
     }
 
     fn return_type(&self, arg_types: &[DataType]) -> Result<DataType> {
-        utf8_to_str_type(&arg_types[0], "rpad")
+        if arg_types[0] == Utf8View {
+            Ok(Utf8View)
+        } else {
+            utf8_to_str_type(&arg_types[0], "rpad")
+        }
     }
 
     fn invoke_with_args(
@@ -165,25 +170,32 @@ fn rpad<StringArrayLen: OffsetSizeTrait, FillArrayLen: OffsetSizeTrait>(
         args.get(2).map(|arg| arg.data_type()),
     ) {
         (2, Utf8View, _) => {
-            rpad_impl::<&StringViewArray, &StringViewArray, StringArrayLen>(
+            let result = rpad_impl::<&StringViewArray, &StringViewArray, StringArrayLen>(
                 &args[0].as_string_view(),
                 length_array,
                 None,
-            )
+            )?;
+            Ok(cast(&result, &Utf8View)?)
         }
         (3, Utf8View, Some(Utf8View)) => {
-            rpad_impl::<&StringViewArray, &StringViewArray, StringArrayLen>(
+            let result = rpad_impl::<&StringViewArray, &StringViewArray, StringArrayLen>(
                 &args[0].as_string_view(),
                 length_array,
                 Some(args[2].as_string_view()),
-            )
+            )?;
+            Ok(cast(&result, &Utf8View)?)
         }
         (3, Utf8View, Some(Utf8 | LargeUtf8)) => {
-            rpad_impl::<&StringViewArray, &GenericStringArray<FillArrayLen>, StringArrayLen>(
+            let result = rpad_impl::<
+                &StringViewArray,
+                &GenericStringArray<FillArrayLen>,
+                StringArrayLen,
+            >(
                 &args[0].as_string_view(),
                 length_array,
                 Some(args[2].as_string::<FillArrayLen>()),
-            )
+            )?;
+            Ok(cast(&result, &Utf8View)?)
         }
         (3, Utf8 | LargeUtf8, Some(Utf8View)) => rpad_impl::<
             &GenericStringArray<StringArrayLen>,
@@ -350,8 +362,8 @@ where
 
 #[cfg(test)]
 mod tests {
-    use arrow::array::{Array, StringArray};
-    use arrow::datatypes::DataType::Utf8;
+    use arrow::array::{Array, StringArray, StringViewArray};
+    use arrow::datatypes::DataType::{Utf8, Utf8View};
 
     use datafusion_common::{Result, ScalarValue};
     use datafusion_expr::{ColumnarValue, ScalarUDFImpl};
@@ -546,6 +558,29 @@ mod tests {
             &str,
             Utf8,
             StringArray
+        );
+        test_function!(
+            RPadFunc::new(),
+            vec![
+                ColumnarValue::Scalar(ScalarValue::Utf8View(Some(String::from("hi")))),
+                ColumnarValue::Scalar(ScalarValue::from(5i64)),
+            ],
+            Ok(Some("hi   ")),
+            &str,
+            Utf8View,
+            StringViewArray
+        );
+        test_function!(
+            RPadFunc::new(),
+            vec![
+                ColumnarValue::Scalar(ScalarValue::Utf8View(Some(String::from("hi")))),
+                ColumnarValue::Scalar(ScalarValue::from(5i64)),
+                ColumnarValue::Scalar(ScalarValue::Utf8View(Some(String::from("xy")))),
+            ],
+            Ok(Some("hixyx")),
+            &str,
+            Utf8View,
+            StringViewArray
         );
         #[cfg(not(feature = "unicode_expressions"))]
         test_function!(
