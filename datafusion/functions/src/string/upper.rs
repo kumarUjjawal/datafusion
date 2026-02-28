@@ -81,7 +81,11 @@ impl ScalarUDFImpl for UpperFunc {
     }
 
     fn return_type(&self, arg_types: &[DataType]) -> Result<DataType> {
-        utf8_to_str_type(&arg_types[0], "upper")
+        if arg_types[0] == DataType::Utf8View {
+            Ok(DataType::Utf8View)
+        } else {
+            utf8_to_str_type(&arg_types[0], "upper")
+        }
     }
 
     fn invoke_with_args(&self, args: ScalarFunctionArgs) -> Result<ColumnarValue> {
@@ -96,8 +100,7 @@ impl ScalarUDFImpl for UpperFunc {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use arrow::array::{Array, ArrayRef, StringArray};
-    use arrow::datatypes::DataType::Utf8;
+    use arrow::array::{Array, ArrayRef, StringArray, StringViewArray};
     use arrow::datatypes::Field;
     use datafusion_common::config::ConfigOptions;
     use std::sync::Arc;
@@ -110,7 +113,7 @@ mod tests {
             number_rows: input.len(),
             args: vec![ColumnarValue::Array(input)],
             arg_fields: vec![arg_field],
-            return_field: Field::new("f", Utf8, true).into(),
+            return_field: Field::new("f", expected.data_type().clone(), true).into(),
             config_options: Arc::new(ConfigOptions::default()),
         };
 
@@ -192,6 +195,23 @@ mod tests {
             Some("TSCHÜSS"),
             Some("Ⱦ"),
             Some("农历新年"),
+        ])) as ArrayRef;
+
+        to_upper(input, expected)
+    }
+
+    #[test]
+    fn upper_utf8view() -> Result<()> {
+        let input = Arc::new(StringViewArray::from(vec![
+            Some("arrow"),
+            None,
+            Some("tschüß"),
+        ])) as ArrayRef;
+
+        let expected = Arc::new(StringViewArray::from(vec![
+            Some("ARROW"),
+            None,
+            Some("TSCHÜSS"),
         ])) as ArrayRef;
 
         to_upper(input, expected)
