@@ -24,6 +24,7 @@ use arrow::array::{
     Array, ArrayRef, AsArray, GenericStringArray, GenericStringBuilder, Int64Array,
     OffsetSizeTrait, StringArrayType, StringViewArray,
 };
+use arrow::compute::kernels::cast::cast;
 use arrow::datatypes::DataType;
 use unicode_segmentation::UnicodeSegmentation;
 
@@ -109,7 +110,11 @@ impl ScalarUDFImpl for LPadFunc {
     }
 
     fn return_type(&self, arg_types: &[DataType]) -> Result<DataType> {
-        utf8_to_str_type(&arg_types[0], "lpad")
+        if arg_types[0] == Utf8View {
+            Ok(Utf8View)
+        } else {
+            utf8_to_str_type(&arg_types[0], "lpad")
+        }
     }
 
     fn invoke_with_args(
@@ -143,21 +148,27 @@ fn lpad<T: OffsetSizeTrait>(args: &[ArrayRef]) -> Result<ArrayRef> {
     let length_array = as_int64_array(&args[1])?;
 
     match (args.len(), args[0].data_type()) {
-        (2, Utf8View) => lpad_impl::<&StringViewArray, &GenericStringArray<i32>, T>(
-            &args[0].as_string_view(),
-            length_array,
-            None,
-        ),
+        (2, Utf8View) => {
+            let result = lpad_impl::<&StringViewArray, &GenericStringArray<i32>, T>(
+                &args[0].as_string_view(),
+                length_array,
+                None,
+            )?;
+            Ok(cast(&result, &Utf8View)?)
+        }
         (2, Utf8 | LargeUtf8) => lpad_impl::<
             &GenericStringArray<T>,
             &GenericStringArray<T>,
             T,
         >(&args[0].as_string::<T>(), length_array, None),
-        (3, Utf8View) => lpad_with_replace::<&StringViewArray, T>(
-            &args[0].as_string_view(),
-            length_array,
-            &args[2],
-        ),
+        (3, Utf8View) => {
+            let result = lpad_with_replace::<&StringViewArray, T>(
+                &args[0].as_string_view(),
+                length_array,
+                &args[2],
+            )?;
+            Ok(cast(&result, &Utf8View)?)
+        }
         (3, Utf8 | LargeUtf8) => lpad_with_replace::<&GenericStringArray<T>, T>(
             &args[0].as_string::<T>(),
             length_array,
@@ -333,8 +344,8 @@ mod tests {
     use crate::unicode::lpad::LPadFunc;
     use crate::utils::test::test_function;
 
-    use arrow::array::{Array, LargeStringArray, StringArray};
-    use arrow::datatypes::DataType::{LargeUtf8, Utf8};
+    use arrow::array::{Array, LargeStringArray, StringArray, StringViewArray};
+    use arrow::datatypes::DataType::{LargeUtf8, Utf8, Utf8View};
 
     use datafusion_common::{Result, ScalarValue};
     use datafusion_expr::{ColumnarValue, ScalarUDFImpl};
@@ -373,8 +384,8 @@ mod tests {
                 ],
                 $EXPECTED,
                 &str,
-                Utf8,
-                StringArray
+                Utf8View,
+                StringViewArray
             );
         };
 
@@ -469,8 +480,8 @@ mod tests {
                 ],
                 $EXPECTED,
                 &str,
-                Utf8,
-                StringArray
+                Utf8View,
+                StringViewArray
             );
             // utf8view, largeutf8
             test_function!(
@@ -482,8 +493,8 @@ mod tests {
                 ],
                 $EXPECTED,
                 &str,
-                Utf8,
-                StringArray
+                Utf8View,
+                StringViewArray
             );
             // utf8view, utf8view
             test_function!(
@@ -495,8 +506,8 @@ mod tests {
                 ],
                 $EXPECTED,
                 &str,
-                Utf8,
-                StringArray
+                Utf8View,
+                StringViewArray
             );
         };
     }

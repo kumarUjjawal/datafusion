@@ -313,6 +313,21 @@ SELECT lpad(NULL, 5, 'xy')
 NULL
 
 query T
+SELECT arrow_typeof(lpad('hi', 5, 'xy'))
+----
+Utf8
+
+query T
+SELECT arrow_typeof(lpad(arrow_cast('hi', 'LargeUtf8'), 5, arrow_cast('xy', 'LargeUtf8')))
+----
+LargeUtf8
+
+query T
+SELECT arrow_typeof(lpad(arrow_cast('hi', 'Utf8View'), 5, arrow_cast('xy', 'Utf8View')))
+----
+Utf8View
+
+query T
 SELECT regexp_replace('foobar', 'bar', 'xx', 'gi')
 ----
 fooxx
