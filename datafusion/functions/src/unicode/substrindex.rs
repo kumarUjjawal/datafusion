@@ -20,7 +20,7 @@ use std::sync::Arc;
 
 use arrow::array::{
     ArrayAccessor, ArrayIter, ArrayRef, ArrowPrimitiveType, AsArray,
-    GenericStringBuilder, OffsetSizeTrait, PrimitiveArray,
+    GenericStringBuilder, OffsetSizeTrait, PrimitiveArray, StringViewBuilder,
 };
 use arrow::datatypes::{DataType, Int32Type, Int64Type};
 
@@ -105,7 +105,11 @@ impl ScalarUDFImpl for SubstrIndexFunc {
     }
 
     fn return_type(&self, arg_types: &[DataType]) -> Result<DataType> {
-        utf8_to_str_type(&arg_types[0], "substr_index")
+        if arg_types[0] == DataType::Utf8View {
+            Ok(DataType::Utf8View)
+        } else {
+            utf8_to_str_type(&arg_types[0], "substr_index")
+        }
     }
 
     fn invoke_with_args(
@@ -157,16 +161,93 @@ fn substr_index(args: &[ArrayRef]) -> Result<ArrayRef> {
             let string_array = str.as_string_view();
             let delimiter_array = delim.as_string_view();
             let count_array: &PrimitiveArray<Int64Type> = count.as_primitive();
-            substr_index_general::<Int32Type, _, _>(
-                string_array,
-                delimiter_array,
-                count_array,
-            )
+            substr_index_view(string_array, delimiter_array, count_array)
         }
         other => {
             exec_err!("Unsupported data type {other:?} for function substr_index")
         }
     }
+}
+
+fn substr_index_value<'a>(string: &'a str, delimiter: &str, n: i64) -> &'a str {
+    // In MySQL, these cases return an empty string.
+    if n == 0 || string.is_empty() || delimiter.is_empty() {
+        return "";
+    }
+
+    let occurrences = usize::try_from(n.unsigned_abs()).unwrap_or(usize::MAX);
+    let result_idx = if delimiter.len() == 1 {
+        // Fast path: use byte-level search for single-character delimiters
+        let d_byte = delimiter.as_bytes()[0];
+        let bytes = string.as_bytes();
+
+        if n > 0 {
+            bytes
+                .iter()
+                .enumerate()
+                .filter(|&(_, &b)| b == d_byte)
+                .nth(occurrences - 1)
+                .map(|(idx, _)| idx)
+        } else {
+            bytes
+                .iter()
+                .enumerate()
+                .rev()
+                .filter(|&(_, &b)| b == d_byte)
+                .nth(occurrences - 1)
+                .map(|(idx, _)| idx + 1)
+        }
+    } else if n > 0 {
+        // Multi-byte path: forward search for n-th occurrence
+        string
+            .match_indices(delimiter)
+            .nth(occurrences - 1)
+            .map(|(idx, _)| idx)
+    } else {
+        // Multi-byte path: backward search for n-th occurrence from the right
+        string
+            .rmatch_indices(delimiter)
+            .nth(occurrences - 1)
+            .map(|(idx, _)| idx + delimiter.len())
+    };
+
+    match result_idx {
+        Some(idx) => {
+            if n > 0 {
+                &string[..idx]
+            } else {
+                &string[idx..]
+            }
+        }
+        None => string,
+    }
+}
+
+fn substr_index_view<
+    'a,
+    V: ArrayAccessor<Item = &'a str>,
+    P: ArrayAccessor<Item = i64>,
+>(
+    string_array: V,
+    delimiter_array: V,
+    count_array: P,
+) -> Result<ArrayRef> {
+    let mut builder = StringViewBuilder::with_capacity(string_array.len());
+    let string_iter = ArrayIter::new(string_array);
+    let delimiter_array_iter = ArrayIter::new(delimiter_array);
+    let count_array_iter = ArrayIter::new(count_array);
+
+    string_iter
+        .zip(delimiter_array_iter)
+        .zip(count_array_iter)
+        .for_each(|((string, delimiter), n)| match (string, delimiter, n) {
+            (Some(string), Some(delimiter), Some(n)) => {
+                builder.append_value(substr_index_value(string, delimiter, n));
+            }
+            _ => builder.append_null(),
+        });
+
+    Ok(Arc::new(builder.finish()) as ArrayRef)
 }
 
 fn substr_index_general<
@@ -192,57 +273,7 @@ where
         .zip(count_array_iter)
         .for_each(|((string, delimiter), n)| match (string, delimiter, n) {
             (Some(string), Some(delimiter), Some(n)) => {
-                // In MySQL, these cases will return an empty string.
-                if n == 0 || string.is_empty() || delimiter.is_empty() {
-                    builder.append_value("");
-                    return;
-                }
-
-                let occurrences = usize::try_from(n.unsigned_abs()).unwrap_or(usize::MAX);
-                let result_idx = if delimiter.len() == 1 {
-                    // Fast path: use byte-level search for single-character delimiters
-                    let d_byte = delimiter.as_bytes()[0];
-                    let bytes = string.as_bytes();
-
-                    if n > 0 {
-                        bytes
-                            .iter()
-                            .enumerate()
-                            .filter(|&(_, &b)| b == d_byte)
-                            .nth(occurrences - 1)
-                            .map(|(idx, _)| idx)
-                    } else {
-                        bytes
-                            .iter()
-                            .enumerate()
-                            .rev()
-                            .filter(|&(_, &b)| b == d_byte)
-                            .nth(occurrences - 1)
-                            .map(|(idx, _)| idx + 1)
-                    }
-                } else if n > 0 {
-                    // Multi-byte path: forward search for n-th occurrence
-                    string
-                        .match_indices(delimiter)
-                        .nth(occurrences - 1)
-                        .map(|(idx, _)| idx)
-                } else {
-                    // Multi-byte path: backward search for n-th occurrence from the right
-                    string
-                        .rmatch_indices(delimiter)
-                        .nth(occurrences - 1)
-                        .map(|(idx, _)| idx + delimiter.len())
-                };
-                match result_idx {
-                    Some(idx) => {
-                        if n > 0 {
-                            builder.append_value(&string[..idx]);
-                        } else {
-                            builder.append_value(&string[idx..]);
-                        }
-                    }
-                    None => builder.append_value(string),
-                }
+                builder.append_value(substr_index_value(string, delimiter, n));
             }
             _ => builder.append_null(),
         });
@@ -252,8 +283,8 @@ where
 
 #[cfg(test)]
 mod tests {
-    use arrow::array::{Array, StringArray};
-    use arrow::datatypes::DataType::Utf8;
+    use arrow::array::{Array, StringArray, StringViewArray};
+    use arrow::datatypes::DataType::{Utf8, Utf8View};
 
     use datafusion_common::{Result, ScalarValue};
     use datafusion_expr::{ColumnarValue, ScalarUDFImpl};
@@ -346,6 +377,20 @@ mod tests {
             &str,
             Utf8,
             StringArray
+        );
+        test_function!(
+            SubstrIndexFunc::new(),
+            vec![
+                ColumnarValue::Scalar(ScalarValue::Utf8View(Some(String::from(
+                    "www.apache.org"
+                )))),
+                ColumnarValue::Scalar(ScalarValue::Utf8View(Some(String::from(".")))),
+                ColumnarValue::Scalar(ScalarValue::from(1i64)),
+            ],
+            Ok(Some("www")),
+            &str,
+            Utf8View,
+            StringViewArray
         );
         Ok(())
     }

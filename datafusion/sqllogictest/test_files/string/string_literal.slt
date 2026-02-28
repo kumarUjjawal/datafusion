@@ -566,6 +566,21 @@ NULL
 
 # Test substring_index using '.' as delimiter
 # This query is compatible with MySQL(8.0.19 or later), convenient for comparing results
+query T
+SELECT arrow_typeof(substring_index('arrow.apache.org', '.', 1))
+----
+Utf8
+
+query T
+SELECT arrow_typeof(substring_index(arrow_cast('arrow.apache.org', 'LargeUtf8'), arrow_cast('.', 'LargeUtf8'), 1))
+----
+LargeUtf8
+
+query T
+SELECT arrow_typeof(substring_index(arrow_cast('arrow.apache.org', 'Utf8View'), arrow_cast('.', 'Utf8View'), 1))
+----
+Utf8View
+
 query TIT
 SELECT str, n, substring_index(str, '.', n) AS c FROM
   (VALUES
