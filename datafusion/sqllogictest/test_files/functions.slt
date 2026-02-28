@@ -244,6 +244,21 @@ SELECT translate(arrow_cast('12345', 'LargeUtf8'), '143', 'ax')
 ----
 a2x5
 
+query T
+SELECT arrow_typeof(translate('12345', '143', 'ax'))
+----
+Utf8
+
+query T
+SELECT arrow_typeof(translate(arrow_cast('12345', 'LargeUtf8'), '143', 'ax'))
+----
+LargeUtf8
+
+query T
+SELECT arrow_typeof(translate(arrow_cast('12345', 'Utf8View'), '143', 'ax'))
+----
+Utf8View
+
 statement ok
 CREATE TABLE test(
   c1 VARCHAR
