@@ -130,21 +130,21 @@ impl ScalarUDFImpl for SplitPartFunc {
         let result = match (args[0].data_type(), args[1].data_type()) {
             (DataType::Utf8View, DataType::Utf8View) => {
                 split_part_view_impl::<&StringViewArray>(
-                    &args[0].as_string_view(),
+                    args[0].as_string_view(),
                     &args[1].as_string_view(),
                     n_array,
                 )
             }
             (DataType::Utf8View, DataType::Utf8) => {
                 split_part_view_impl::<&GenericStringArray<i32>>(
-                    &args[0].as_string_view(),
+                    args[0].as_string_view(),
                     &args[1].as_string::<i32>(),
                     n_array,
                 )
             }
             (DataType::Utf8View, DataType::LargeUtf8) => {
                 split_part_view_impl::<&GenericStringArray<i64>>(
-                    &args[0].as_string_view(),
+                    args[0].as_string_view(),
                     &args[1].as_string::<i64>(),
                     n_array,
                 )

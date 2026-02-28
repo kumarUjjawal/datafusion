@@ -117,7 +117,7 @@ fn reverse<T: OffsetSizeTrait>(args: &[ArrayRef]) -> Result<ArrayRef> {
 }
 
 fn reverse_view(args: &[ArrayRef]) -> Result<ArrayRef> {
-    reverse_view_impl(&args[0].as_string_view())
+    reverse_view_impl(args[0].as_string_view())
 }
 
 fn reverse_impl<'a, T: OffsetSizeTrait, V: StringArrayType<'a>>(
