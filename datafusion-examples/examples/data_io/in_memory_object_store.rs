@@ -21,7 +21,7 @@
 //! (or use an existing implementation), register it with DataFusion, and then
 //! read a URL "path" from that store.
 //! See the in-memory reference implementation:
-//! https://docs.rs/object_store/0.6.1/object_store/memory/struct.InMemory.html
+//! https://docs.rs/object_store/latest/object_store/memory/struct.InMemory.html
 
 use std::sync::Arc;
 
