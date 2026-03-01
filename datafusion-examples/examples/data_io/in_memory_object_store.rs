@@ -25,24 +25,24 @@
 
 use std::sync::Arc;
 
-use arrow::array::{Int64Array, RecordBatch, StringArray};
 use arrow::datatypes::{DataType, Field, Schema};
 use datafusion::assert_batches_eq;
 use datafusion::common::Result;
-use datafusion::parquet::arrow::ArrowWriter;
-use datafusion::prelude::{
-    CsvReadOptions, JsonReadOptions, ParquetReadOptions, SessionContext,
-};
+use datafusion::prelude::{CsvReadOptions, SessionContext};
 use object_store::memory::InMemory;
 use object_store::path::Path;
 use object_store::{ObjectStore, PutPayload};
 use url::Url;
 
-/// Demonstrates reading CSV/JSON/Parquet data from an in-memory object store.
+/// Demonstrates reading CSV data from an in-memory object store.
+///
+/// The same pattern applies to JSON/Parquet: register a store for a URL
+/// prefix, write bytes into the store, then read via that URL.
 pub async fn in_memory_object_store() -> Result<()> {
     let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
     let ctx = SessionContext::new();
     let object_store_url = Url::parse("mem://").unwrap();
+    // Register a URL prefix to route reads through this object store.
     ctx.register_object_store(&object_store_url, Arc::clone(&store));
 
     let schema = Schema::new(vec![
@@ -53,9 +53,11 @@ pub async fn in_memory_object_store() -> Result<()> {
     println!("=== CSV from memory ===");
     let csv_path = Path::from("/people.csv");
     let csv_data = b"id,name\n1,Alice\n2,Bob\n";
+    // Write bytes into the in-memory object store.
     store
         .put(&csv_path, PutPayload::from_static(csv_data))
         .await?;
+    // Read using the URL that matches the registered prefix.
     let csv = ctx
         .read_csv("mem:///people.csv", CsvReadOptions::new().schema(&schema))
         .await?
@@ -71,47 +73,6 @@ pub async fn in_memory_object_store() -> Result<()> {
         "+----+-------+",
     ];
     assert_batches_eq!(expected, &csv);
-
-    println!("=== JSON (NDJSON) from memory ===");
-    let json_path = Path::from("/people.json");
-    let json_data = br#"{"id":1,"name":"Alice"}
-{"id":2,"name":"Bob"}
-"#;
-    store
-        .put(&json_path, PutPayload::from_static(json_data))
-        .await?;
-    let json = ctx
-        .read_json(
-            "mem:///people.json",
-            JsonReadOptions::default().schema(&schema),
-        )
-        .await?
-        .collect()
-        .await?;
-    assert_batches_eq!(expected, &json);
-
-    println!("=== Parquet from memory ===");
-    let parquet_path = Path::from("/people.parquet");
-    let batch = RecordBatch::try_new(
-        Arc::new(schema.clone()),
-        vec![
-            Arc::new(Int64Array::from(vec![1, 2])),
-            Arc::new(StringArray::from(vec!["Alice", "Bob"])),
-        ],
-    )?;
-    let mut buf = vec![];
-    let mut writer = ArrowWriter::try_new(&mut buf, batch.schema(), None)?;
-    writer.write(&batch)?;
-    writer.close()?;
-    store
-        .put(&parquet_path, PutPayload::from_bytes(buf.into()))
-        .await?;
-    let parquet = ctx
-        .read_parquet("mem:///people.parquet", ParquetReadOptions::default())
-        .await?
-        .collect()
-        .await?;
-    assert_batches_eq!(expected, &parquet);
 
     Ok(())
 }

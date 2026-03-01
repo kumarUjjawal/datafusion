@@ -31,7 +31,7 @@
 //!   (file: catalog.rs, desc: Register tables into a custom catalog)
 //!
 //! - `in_memory_object_store`
-//!   (file: in_memory_object_store.rs, desc: Read CSV/JSON/Parquet from an in-memory object store)
+//!   (file: in_memory_object_store.rs, desc: Read CSV from an in-memory object store (pattern applies to JSON/Parquet))
 //!
 //! - `json_shredding`
 //!   (file: json_shredding.rs, desc: Implement filter rewriting for JSON shredding)
