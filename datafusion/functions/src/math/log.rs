@@ -1118,7 +1118,6 @@ mod tests {
                     .expect("failed to convert result to a Float64Array");
 
                 assert_eq!(floats.len(), 7);
-                eprintln!("floats {:?}", &floats);
                 assert!((floats.value(0) - 1.0).abs() < 1e-10);
                 assert!((floats.value(1) - 2.0).abs() < 1e-10);
                 assert!((floats.value(2) - 3.0).abs() < 1e-10);
