@@ -104,6 +104,21 @@ async fn count_aggregated() -> Result<()> {
 }
 
 #[tokio::test]
+async fn count_aggregated_group_by_all_alias() -> Result<()> {
+    let results =
+        execute_with_partition("SELECT count(*) AS c FROM test GROUP BY ALL", 4).await?;
+
+    assert_snapshot!(batches_to_sort_string(&results), @r"
+    +----+
+    | c  |
+    +----+
+    | 40 |
+    +----+
+    ");
+    Ok(())
+}
+
+#[tokio::test]
 async fn count_aggregated_cube() -> Result<()> {
     let results = execute_with_partition(
         "SELECT c1, c2, count(c3) FROM test GROUP BY CUBE (c1, c2) ORDER BY c1, c2",
