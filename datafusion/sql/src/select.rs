@@ -192,9 +192,8 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                 })
                 .collect::<Result<Vec<Expr>>>()?
         } else {
-            // 'group by all' groups wrt. all select expressions except aggregate expressions.
-            // Note: aggregate expressions can be nested under one or more aliases
-            // (e.g. count(1) AS count(*) AS c), so detect aggregates recursively.
+            // 'group by all' groups wrt. all select expressions except 'AggregateFunction's.
+            // Filter and collect non-aggregate select expressions.
             select_exprs
                 .iter()
                 .filter(|select_expr| {

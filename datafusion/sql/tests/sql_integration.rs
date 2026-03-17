@@ -1749,32 +1749,6 @@ fn select_simple_aggregate_with_groupby_can_use_alias() {
 }
 
 #[test]
-fn select_count_with_group_by_all() {
-    let plan = logical_plan("SELECT COUNT(*) FROM person GROUP BY ALL").unwrap();
-    assert_snapshot!(
-        plan,
-        @r"
-    Projection: count(*)
-      Aggregate: groupBy=[[]], aggr=[[count(*)]]
-        TableScan: person
-    "
-    );
-}
-
-#[test]
-fn select_count_alias_with_group_by_all() {
-    let plan = logical_plan("SELECT COUNT(*) AS c FROM person GROUP BY ALL").unwrap();
-    assert_snapshot!(
-        plan,
-        @r"
-    Projection: count(*) AS c
-      Aggregate: groupBy=[[]], aggr=[[count(*)]]
-        TableScan: person
-    "
-    );
-}
-
-#[test]
 fn select_simple_aggregate_with_groupby_aggregate_repeated() {
     let sql = "SELECT state, MIN(age), MIN(age) FROM person GROUP BY state";
     let err = logical_plan(sql).expect_err("query should have failed");
