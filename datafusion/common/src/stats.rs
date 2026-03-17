@@ -660,7 +660,7 @@ impl Statistics {
     /// assert_eq!(merged.column_statistics[0].max_value,
     ///     Precision::Exact(ScalarValue::from(200)));
     /// assert_eq!(merged.column_statistics[0].sum_value,
-    ///     Precision::Exact(ScalarValue::from(1500)));
+    ///     Precision::Exact(ScalarValue::Int64(Some(1500))));
     /// ```
     pub fn try_merge_iter<'a, I>(items: I, schema: &Schema) -> Result<Statistics>
     where
