@@ -111,4 +111,22 @@ mod tests {
 
         assert_eq!(lhs, Precision::Absent);
     }
+    
+    #[test]
+    fn test_precision_add_rhs_absent_absorbs() {
+        let mut lhs = Precision::Exact(ScalarValue::Int32(Some(42)));
+
+        precision_add(&mut lhs, &Precision::Absent);
+
+        assert_eq!(lhs, Precision::Absent);
+    }
+
+    #[test]
+    fn test_precision_add_mixed_exactness() {
+        let mut lhs = Precision::Exact(ScalarValue::Int32(Some(10)));
+
+        precision_add(&mut lhs, &Precision::Inexact(ScalarValue::Int32(Some(5))));
+
+        assert_eq!(lhs, Precision::Inexact(ScalarValue::Int32(Some(15))));
+    }
 }
