@@ -487,6 +487,7 @@ pub mod test {
                 // Enum is deprecated
                 #[expect(deprecated)]
                 RexType::Enum(_) => {}
+                RexType::Lambda(_) | RexType::LambdaInvocation(_) => {}
             }
             Ok(())
         }
