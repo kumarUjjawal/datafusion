@@ -111,7 +111,7 @@ mod tests {
 
         assert_eq!(lhs, Precision::Absent);
     }
-    
+
     #[test]
     fn test_precision_add_rhs_absent_absorbs() {
         let mut lhs = Precision::Exact(ScalarValue::Int32(Some(42)));

@@ -2067,12 +2067,17 @@ impl ScalarValue {
     where
         T::Native: ArrowNativeTypeOp,
     {
+        Self::validate_decimal_or_internal_err::<T>(*lhs_precision, *lhs_scale)?;
+        Self::validate_decimal_or_internal_err::<T>(rhs_precision, rhs_scale)?;
+
         let result_scale = (*lhs_scale).max(rhs_scale);
-        let result_precision = (result_scale.saturating_add(
-            (*lhs_precision as i8 - *lhs_scale).max(rhs_precision as i8 - rhs_scale),
-        ) as u8)
-            .saturating_add(1)
-            .min(T::MAX_PRECISION);
+        // Decimal scales can be negative, so use a wider signed type for the
+        // intermediate precision arithmetic.
+        let lhs_precision_delta = i16::from(*lhs_precision) - i16::from(*lhs_scale);
+        let rhs_precision_delta = i16::from(rhs_precision) - i16::from(rhs_scale);
+        let result_precision =
+            (i16::from(result_scale) + lhs_precision_delta.max(rhs_precision_delta) + 1)
+                .min(i16::from(T::MAX_PRECISION)) as u8;
 
         Self::validate_decimal_or_internal_err::<T>(result_precision, result_scale)?;
 
@@ -6204,6 +6209,20 @@ mod tests {
         assert_eq!(
             decimal.add(decimal_2)?,
             ScalarValue::Decimal256(Some(i256::from(163)), 11, 2)
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn scalar_add_trait_decimal_negative_scale_test() -> Result<()> {
+        let decimal = ScalarValue::Decimal128(Some(1), DECIMAL128_MAX_PRECISION, i8::MIN);
+        let decimal_2 =
+            ScalarValue::Decimal128(Some(1), DECIMAL128_MAX_PRECISION, i8::MIN);
+
+        assert_eq!(
+            decimal.add(decimal_2)?,
+            ScalarValue::Decimal128(Some(2), DECIMAL128_MAX_PRECISION, i8::MIN)
         );
 
         Ok(())
