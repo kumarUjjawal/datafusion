@@ -43,7 +43,7 @@ use crate::joins::hash_join::stream::{
 use crate::joins::join_hash_map::{JoinHashMapU32, JoinHashMapU64};
 use crate::joins::utils::{
     OnceAsync, OnceFut, asymmetric_join_output_partitioning, reorder_output_after_swap,
-    swap_join_projection, update_hash,
+    swap_join_projection, update_hash_with_values,
 };
 use crate::joins::{JoinOn, JoinOnRef, PartitionMode, SharedBitmapBuilder};
 use crate::metrics::{Count, MetricBuilder};
@@ -65,8 +65,8 @@ use crate::{
     metrics::{ExecutionPlanMetricsSet, MetricsSet},
 };
 
-use arrow::array::{ArrayRef, BooleanBufferBuilder};
-use arrow::compute::concat_batches;
+use arrow::array::{Array, ArrayRef, BooleanBufferBuilder};
+use arrow::compute::concat;
 use arrow::datatypes::SchemaRef;
 use arrow::record_batch::RecordBatch;
 use arrow::util::bit_util;
@@ -103,24 +103,21 @@ pub(crate) const HASH_JOIN_SEED: SeededRandomState =
 
 const ARRAY_MAP_CREATED_COUNT_METRIC_NAME: &str = "array_map_created_count";
 
-#[expect(clippy::too_many_arguments)]
 fn try_create_array_map(
     bounds: &Option<PartitionBounds>,
-    schema: &SchemaRef,
     batches: &[RecordBatch],
-    on_left: &[PhysicalExprRef],
+    values_by_batch: &[Vec<ArrayRef>],
     reservation: &mut MemoryReservation,
     perfect_hash_join_small_build_threshold: usize,
     perfect_hash_join_min_key_density: f64,
     null_equality: NullEquality,
-) -> Result<Option<(ArrayMap, RecordBatch, Vec<ArrayRef>)>> {
-    if on_left.len() != 1 {
+) -> Result<Option<ArrayMap>> {
+    if values_by_batch.first().map_or(0, Vec::len) != 1 {
         return Ok(None);
     }
 
     if null_equality == NullEquality::NullEqualsNull {
-        for batch in batches.iter() {
-            let arrays = evaluate_expressions_to_arrays(on_left, batch)?;
+        for arrays in values_by_batch {
             if arrays[0].null_count() > 0 {
                 return Ok(None);
             }
@@ -178,23 +175,52 @@ fn try_create_array_map(
     let mem_size = ArrayMap::estimate_memory_size(min_val, max_val, num_row);
     reservation.try_grow(mem_size)?;
 
-    let batch = concat_batches(schema, batches)?;
-    let left_values = evaluate_expressions_to_arrays(on_left, &batch)?;
+    let first_key_arrays: Vec<&dyn Array> = values_by_batch
+        .iter()
+        .map(|values| values[0].as_ref())
+        .collect();
+    let left_value = match first_key_arrays.as_slice() {
+        [] => return Ok(None),
+        [_] => Arc::clone(&values_by_batch[0][0]),
+        _ => concat(&first_key_arrays)?,
+    };
 
-    let array_map = ArrayMap::try_new(&left_values[0], min_val, max_val)?;
+    Ok(Some(ArrayMap::try_new(&left_value, min_val, max_val)?))
+}
 
-    Ok(Some((array_map, batch, left_values)))
+fn concat_values_by_column(values_by_batch: &[Vec<ArrayRef>]) -> Result<Vec<ArrayRef>> {
+    let Some(first_batch) = values_by_batch.first() else {
+        return Ok(vec![]);
+    };
+
+    (0..first_batch.len())
+        .map(|value_index| {
+            let arrays: Vec<&dyn Array> = values_by_batch
+                .iter()
+                .map(|values| values[value_index].as_ref())
+                .collect();
+            if arrays.len() == 1 {
+                Ok(Arc::clone(&values_by_batch[0][value_index]))
+            } else {
+                Ok(concat(&arrays)?)
+            }
+        })
+        .collect()
 }
 
 /// HashTable and input data for the left (build side) of a join
 pub(super) struct JoinLeftData {
-    /// The hash table with indices into `batch`
+    /// The hash table with indices into the logical concatenation of `batches`
     /// Arc is used to allow sharing with SharedBuildAccumulator for hash map pushdown
     pub(super) map: Arc<Map>,
-    /// The input rows for the build side
-    batch: RecordBatch,
-    /// The build side on expressions values
-    values: Vec<ArrayRef>,
+    /// Schema for the build side input
+    schema: SchemaRef,
+    /// Build-side input batches in the same logical order as hash-map row indices
+    batches: Vec<RecordBatch>,
+    /// Inclusive start offset for each build-side batch, followed by the total row count
+    batch_offsets: Vec<usize>,
+    /// Per-build-batch values of the build-side join expressions
+    values: Vec<Vec<ArrayRef>>,
     /// Shared bitmap builder for visited left indices
     visited_indices_bitmap: SharedBitmapBuilder,
     /// Counter of running probe-threads, potentially
@@ -225,14 +251,29 @@ impl JoinLeftData {
         &self.map
     }
 
-    /// returns a reference to the build side batch
-    pub(super) fn batch(&self) -> &RecordBatch {
-        &self.batch
+    /// returns the build side schema
+    pub(super) fn schema(&self) -> &SchemaRef {
+        &self.schema
+    }
+
+    /// returns a reference to the build side batches
+    pub(super) fn batches(&self) -> &[RecordBatch] {
+        &self.batches
+    }
+
+    /// returns a reference to the build side batch offsets
+    pub(super) fn batch_offsets(&self) -> &[usize] {
+        &self.batch_offsets
     }
 
     /// returns a reference to the build side expressions values
-    pub(super) fn values(&self) -> &[ArrayRef] {
+    pub(super) fn values(&self) -> &[Vec<ArrayRef>] {
         &self.values
+    }
+
+    /// returns an empty build-side batch with the correct schema
+    pub(super) fn empty_batch(&self) -> RecordBatch {
+        RecordBatch::new_empty(Arc::clone(&self.schema))
     }
 
     /// returns a reference to the visited indices bitmap
@@ -1890,7 +1931,7 @@ fn should_collect_min_max_for_perfect_hash(
 /// before updating the filter exactly once.
 ///
 /// # Returns
-/// `JoinLeftData` containing the hash map, consolidated batch, join key values,
+/// `JoinLeftData` containing the hash map, logical build-side batches, join key values,
 /// visited indices bitmap, and computed bounds (if requested).
 #[expect(clippy::too_many_arguments)]
 async fn collect_left_input(
@@ -1965,81 +2006,99 @@ async fn collect_left_input(
         _ => None,
     };
 
-    let (join_hash_map, batch, left_values) =
-        if let Some((array_map, batch, left_value)) = try_create_array_map(
-            &bounds,
-            &schema,
-            &batches,
-            &on_left,
-            &mut reservation,
-            config.execution.perfect_hash_join_small_build_threshold,
-            config.execution.perfect_hash_join_min_key_density,
-            null_equality,
-        )? {
-            array_map_created_count.add(1);
-            metrics.build_mem_used.add(array_map.size());
+    // Evaluate key expressions per batch in the original collection order.
+    // The ArrayMap path uses forward order (matching how ArrayMap::fill_data
+    // iterates the concatenated key array), while the HashMap path reverses
+    // the batches so that FIFO chain ordering is preserved.
+    let mut batches = batches;
+    let mut values_by_batch = batches
+        .iter()
+        .map(|batch| evaluate_expressions_to_arrays(&on_left, batch))
+        .collect::<Result<Vec<_>>>()?;
 
-            (Map::ArrayMap(array_map), batch, left_value)
+    let join_hash_map = if let Some(array_map) = try_create_array_map(
+        &bounds,
+        &batches,
+        &values_by_batch,
+        &mut reservation,
+        config.execution.perfect_hash_join_small_build_threshold,
+        config.execution.perfect_hash_join_min_key_density,
+        null_equality,
+    )? {
+        array_map_created_count.add(1);
+        metrics.build_mem_used.add(array_map.size());
+
+        Map::ArrayMap(array_map)
+    } else {
+        // Reverse batches and values for FIFO hash-map chain ordering
+        // (last collected batch gets the lowest offsets so that the
+        // chain head points to the earliest matching row).
+        batches.reverse();
+        values_by_batch.reverse();
+
+        // Estimation of memory size, required for hashtable, prior to allocation.
+        // Final result can be verified using `RawTable.allocation_info()`
+        let fixed_size_u32 = size_of::<JoinHashMapU32>();
+        let fixed_size_u64 = size_of::<JoinHashMapU64>();
+
+        // Use `u32` indices for the JoinHashMap when num_rows ≤ u32::MAX, otherwise use the
+        // `u64` indice variant
+        // Arc is used instead of Box to allow sharing with SharedBuildAccumulator for hash map pushdown
+        let mut hashmap: Box<dyn JoinHashMapType> = if num_rows > u32::MAX as usize {
+            let estimated_hashtable_size =
+                estimate_memory_size::<(u64, u64)>(num_rows, fixed_size_u64)?;
+            reservation.try_grow(estimated_hashtable_size)?;
+            metrics.build_mem_used.add(estimated_hashtable_size);
+            Box::new(JoinHashMapU64::with_capacity(num_rows))
         } else {
-            // Estimation of memory size, required for hashtable, prior to allocation.
-            // Final result can be verified using `RawTable.allocation_info()`
-            let fixed_size_u32 = size_of::<JoinHashMapU32>();
-            let fixed_size_u64 = size_of::<JoinHashMapU64>();
-
-            // Use `u32` indices for the JoinHashMap when num_rows ≤ u32::MAX, otherwise use the
-            // `u64` indice variant
-            // Arc is used instead of Box to allow sharing with SharedBuildAccumulator for hash map pushdown
-            let mut hashmap: Box<dyn JoinHashMapType> = if num_rows > u32::MAX as usize {
-                let estimated_hashtable_size =
-                    estimate_memory_size::<(u64, u64)>(num_rows, fixed_size_u64)?;
-                reservation.try_grow(estimated_hashtable_size)?;
-                metrics.build_mem_used.add(estimated_hashtable_size);
-                Box::new(JoinHashMapU64::with_capacity(num_rows))
-            } else {
-                let estimated_hashtable_size =
-                    estimate_memory_size::<(u32, u64)>(num_rows, fixed_size_u32)?;
-                reservation.try_grow(estimated_hashtable_size)?;
-                metrics.build_mem_used.add(estimated_hashtable_size);
-                Box::new(JoinHashMapU32::with_capacity(num_rows))
-            };
-
-            let mut hashes_buffer = Vec::new();
-            let mut offset = 0;
-
-            let batches_iter = batches.iter().rev();
-
-            // Updating hashmap starting from the last batch
-            for batch in batches_iter.clone() {
-                hashes_buffer.clear();
-                hashes_buffer.resize(batch.num_rows(), 0);
-                update_hash(
-                    &on_left,
-                    batch,
-                    &mut *hashmap,
-                    offset,
-                    &random_state,
-                    &mut hashes_buffer,
-                    0,
-                    true,
-                )?;
-                offset += batch.num_rows();
-            }
-
-            // Merge all batches into a single batch, so we can directly index into the arrays
-            let batch = concat_batches(&schema, batches_iter.clone())?;
-
-            let left_values = evaluate_expressions_to_arrays(&on_left, &batch)?;
-
-            (Map::HashMap(hashmap), batch, left_values)
+            let estimated_hashtable_size =
+                estimate_memory_size::<(u32, u64)>(num_rows, fixed_size_u32)?;
+            reservation.try_grow(estimated_hashtable_size)?;
+            metrics.build_mem_used.add(estimated_hashtable_size);
+            Box::new(JoinHashMapU32::with_capacity(num_rows))
         };
+
+        let mut hashes_buffer = Vec::new();
+        let mut offset = 0;
+
+        // Updating hashmap in the same logical order used by the stored build-side batches
+        for (batch, values) in batches.iter().zip(values_by_batch.iter()) {
+            hashes_buffer.clear();
+            hashes_buffer.resize(batch.num_rows(), 0);
+            update_hash_with_values(
+                values,
+                batch.num_rows(),
+                &mut *hashmap,
+                offset,
+                &random_state,
+                &mut hashes_buffer,
+                0,
+                true,
+            )?;
+            offset += batch.num_rows();
+        }
+
+        Map::HashMap(hashmap)
+    };
+
+    // Compute batch offsets from the final batches order (forward for ArrayMap,
+    // reversed for HashMap) so that locate_record_batch can map global row
+    // indices back to (batch_index, local_index).
+    let mut batch_offsets = Vec::with_capacity(batches.len() + 1);
+    batch_offsets.push(0);
+    for batch in &batches {
+        let next_offset =
+            batch_offsets.last().copied().unwrap_or_default() + batch.num_rows();
+        batch_offsets.push(next_offset);
+    }
 
     // Reserve additional memory for visited indices bitmap and create shared builder
     let visited_indices_bitmap = if with_visited_indices_bitmap {
-        let bitmap_size = bit_util::ceil(batch.num_rows(), 8);
+        let bitmap_size = bit_util::ceil(num_rows, 8);
         reservation.try_grow(bitmap_size)?;
         metrics.build_mem_used.add(bitmap_size);
 
-        let mut bitmap_buffer = BooleanBufferBuilder::new(batch.num_rows());
+        let mut bitmap_buffer = BooleanBufferBuilder::new(num_rows);
         bitmap_buffer.append_n(num_rows, false);
         bitmap_buffer
     } else {
@@ -2054,12 +2113,14 @@ async fn collect_left_input(
         // If the build side is small enough we can use IN list pushdown.
         // If it's too big we fall back to pushing down a reference to the hash table.
         // See `PushdownStrategy` for more details.
-        let estimated_size = left_values
+        let estimated_size = values_by_batch
             .iter()
+            .flatten()
             .map(|arr| arr.get_array_memory_size())
             .sum::<usize>();
-        if left_values.is_empty()
-            || left_values[0].is_empty()
+        if values_by_batch.is_empty()
+            || values_by_batch[0].is_empty()
+            || values_by_batch[0][0].is_empty()
             || estimated_size > config.optimizer.hash_join_inlist_pushdown_max_size
             || map.num_of_distinct_key()
                 > config
@@ -2067,7 +2128,9 @@ async fn collect_left_input(
                     .hash_join_inlist_pushdown_max_distinct_values
         {
             PushdownStrategy::Map(Arc::clone(&map))
-        } else if let Some(in_list_values) = build_struct_inlist_values(&left_values)? {
+        } else if let Some(in_list_values) =
+            build_struct_inlist_values(&concat_values_by_column(&values_by_batch)?)?
+        {
             PushdownStrategy::InList(in_list_values)
         } else {
             PushdownStrategy::Map(Arc::clone(&map))
@@ -2080,8 +2143,10 @@ async fn collect_left_input(
 
     let data = JoinLeftData {
         map,
-        batch,
-        values: left_values,
+        schema,
+        batches,
+        batch_offsets,
+        values: values_by_batch,
         visited_indices_bitmap: Mutex::new(visited_indices_bitmap),
         probe_threads_counter: AtomicUsize::new(probe_threads_count),
         _reservation: reservation,
@@ -2143,7 +2208,8 @@ mod tests {
     };
 
     use arrow::array::{
-        Date32Array, Int32Array, Int64Array, StructArray, UInt32Array, UInt64Array,
+        Date32Array, FixedSizeListArray, Int32Array, Int64Array, NullArray, StructArray,
+        UInt32Array, UInt64Array,
     };
     use arrow::buffer::NullBuffer;
     use arrow::datatypes::{DataType, Field};
@@ -2232,6 +2298,31 @@ mod tests {
         )
         .unwrap();
         TestMemoryExec::try_new_exec(&[vec![batch]], schema, None).unwrap()
+    }
+
+    fn build_fixed_size_list_null_batch(
+        id_name: &str,
+        value_name: &str,
+        start: usize,
+        len: usize,
+        value_length: i32,
+    ) -> RecordBatch {
+        let value_field = Arc::new(Field::new("item", DataType::Null, true));
+        let schema = Arc::new(Schema::new(vec![
+            Field::new(id_name, DataType::UInt32, false),
+            Field::new(
+                value_name,
+                DataType::FixedSizeList(Arc::clone(&value_field), value_length),
+                false,
+            ),
+        ]));
+        let ids = UInt32Array::from_iter_values((start as u32)..((start + len) as u32));
+        let values = NullArray::new(len * value_length as usize);
+        let fixed_size_list =
+            FixedSizeListArray::new(value_field, value_length, Arc::new(values), None);
+
+        RecordBatch::try_new(schema, vec![Arc::new(ids), Arc::new(fixed_size_list)])
+            .unwrap()
     }
 
     fn join(
@@ -3063,6 +3154,372 @@ mod tests {
         }
 
         assert_phj_used(&metrics, use_perfect_hash_join_as_possible);
+    }
+
+    #[tokio::test]
+    async fn join_full_fixed_size_list_high_build_index_with_fetch() -> Result<()> {
+        const VALUE_LENGTH: i32 = 1000;
+        const CHUNK_SIZE: usize = 1_000_000;
+
+        let row_count = (u32::MAX as usize / VALUE_LENGTH as usize) + 1;
+        let match_id = (row_count - 1) as u32;
+        let task_ctx = prepare_task_ctx(1, false);
+
+        let left_schema = Arc::new(Schema::new(vec![
+            Field::new("id_left", DataType::UInt32, false),
+            Field::new(
+                "vec_left",
+                DataType::FixedSizeList(
+                    Arc::new(Field::new("item", DataType::Null, true)),
+                    VALUE_LENGTH,
+                ),
+                false,
+            ),
+        ]));
+        let mut left_batches = Vec::new();
+        let mut start = 0;
+        while start < row_count {
+            let len = (row_count - start).min(CHUNK_SIZE);
+            left_batches.push(build_fixed_size_list_null_batch(
+                "id_left",
+                "vec_left",
+                start,
+                len,
+                VALUE_LENGTH,
+            ));
+            start += len;
+        }
+        let left = TestMemoryExec::try_new_exec(
+            &[left_batches],
+            Arc::clone(&left_schema),
+            None,
+        )?;
+
+        let right_schema = Arc::new(Schema::new(vec![Field::new(
+            "id_right",
+            DataType::UInt32,
+            false,
+        )]));
+        let right_batch = RecordBatch::try_new(
+            Arc::clone(&right_schema),
+            vec![Arc::new(UInt32Array::from(vec![match_id]))],
+        )?;
+        let right =
+            TestMemoryExec::try_new_exec(&[vec![right_batch]], right_schema, None)?;
+
+        let on = vec![(
+            Arc::new(Column::new_with_schema("id_left", &left.schema())?) as _,
+            Arc::new(Column::new_with_schema("id_right", &right.schema())?) as _,
+        )];
+
+        let join = join(
+            left,
+            right,
+            on,
+            &JoinType::Full,
+            NullEquality::NullEqualsNothing,
+        )?
+        .builder()
+        .with_fetch(Some(1))
+        .build()?;
+
+        let batches = common::collect(join.execute(0, task_ctx)?).await?;
+        assert_eq!(batches.len(), 1);
+        assert_eq!(batches[0].num_rows(), 1);
+
+        let left_ids = batches[0]
+            .column(0)
+            .as_any()
+            .downcast_ref::<UInt32Array>()
+            .unwrap();
+        assert_eq!(left_ids.value(0), match_id);
+        assert!(!batches[0].column(1).is_null(0));
+        let right_ids = batches[0]
+            .column(2)
+            .as_any()
+            .downcast_ref::<UInt32Array>()
+            .unwrap();
+        assert_eq!(right_ids.value(0), match_id);
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn join_full_fixed_size_list_unmatched_rows() -> Result<()> {
+        const VALUE_LENGTH: i32 = 3;
+
+        let task_ctx = prepare_task_ctx(1, false);
+        let left_schema = Arc::new(Schema::new(vec![
+            Field::new("id_left", DataType::UInt32, false),
+            Field::new(
+                "vec_left",
+                DataType::FixedSizeList(
+                    Arc::new(Field::new("item", DataType::Null, true)),
+                    VALUE_LENGTH,
+                ),
+                false,
+            ),
+        ]));
+        let left = TestMemoryExec::try_new_exec(
+            &[vec![
+                build_fixed_size_list_null_batch(
+                    "id_left",
+                    "vec_left",
+                    0,
+                    2,
+                    VALUE_LENGTH,
+                ),
+                build_fixed_size_list_null_batch(
+                    "id_left",
+                    "vec_left",
+                    2,
+                    2,
+                    VALUE_LENGTH,
+                ),
+            ]],
+            Arc::clone(&left_schema),
+            None,
+        )?;
+
+        let right_schema = Arc::new(Schema::new(vec![Field::new(
+            "id_right",
+            DataType::UInt32,
+            false,
+        )]));
+        let right_batch = RecordBatch::try_new(
+            Arc::clone(&right_schema),
+            vec![Arc::new(UInt32Array::from(vec![3]))],
+        )?;
+        let right =
+            TestMemoryExec::try_new_exec(&[vec![right_batch]], right_schema, None)?;
+
+        let on = vec![(
+            Arc::new(Column::new_with_schema("id_left", &left.schema())?) as _,
+            Arc::new(Column::new_with_schema("id_right", &right.schema())?) as _,
+        )];
+
+        let join = join(
+            left,
+            right,
+            on,
+            &JoinType::Full,
+            NullEquality::NullEqualsNothing,
+        )?;
+
+        let batches = common::collect(join.execute(0, task_ctx)?).await?;
+        let total_rows = batches.iter().map(RecordBatch::num_rows).sum::<usize>();
+        assert_eq!(total_rows, 4);
+
+        let mut left_ids = Vec::new();
+        let mut matched_right_ids = Vec::new();
+        let mut right_nulls = 0;
+        for batch in &batches {
+            let left_ids_array = batch
+                .column(0)
+                .as_any()
+                .downcast_ref::<UInt32Array>()
+                .unwrap();
+            let right_ids_array = batch
+                .column(2)
+                .as_any()
+                .downcast_ref::<UInt32Array>()
+                .unwrap();
+            for row in 0..batch.num_rows() {
+                left_ids.push(left_ids_array.value(row));
+                assert!(!batch.column(1).is_null(row));
+                if right_ids_array.is_null(row) {
+                    right_nulls += 1;
+                } else {
+                    matched_right_ids.push(right_ids_array.value(row));
+                }
+            }
+        }
+
+        left_ids.sort_unstable();
+        matched_right_ids.sort_unstable();
+        assert_eq!(left_ids, vec![0, 1, 2, 3]);
+        assert_eq!(matched_right_ids, vec![3]);
+        assert_eq!(right_nulls, 3);
+
+        Ok(())
+    }
+
+    /// Tests FULL join with a join filter on a schema that includes
+    /// FixedSizeList columns, exercising the
+    /// `apply_join_filter_to_indices_from_batches` path with multi-batch
+    /// build-side data.
+    #[tokio::test]
+    async fn join_full_fixed_size_list_with_filter() -> Result<()> {
+        const VALUE_LENGTH: i32 = 3;
+
+        let task_ctx = prepare_task_ctx(1, false);
+
+        // Build-side: two batches with (id, fsl, score) columns.
+        // Batch 0: ids 0,1  scores 10,20
+        // Batch 1: ids 2,3  scores 30,5
+        let fsl_field = Arc::new(Field::new("item", DataType::Null, true));
+        let left_schema = Arc::new(Schema::new(vec![
+            Field::new("id_left", DataType::UInt32, false),
+            Field::new(
+                "vec_left",
+                DataType::FixedSizeList(Arc::clone(&fsl_field), VALUE_LENGTH),
+                false,
+            ),
+            Field::new("score_left", DataType::Int32, false),
+        ]));
+
+        fn build_left_batch(
+            schema: &Arc<Schema>,
+            fsl_field: &Arc<Field>,
+            ids: Vec<u32>,
+            scores: Vec<i32>,
+            value_length: i32,
+        ) -> RecordBatch {
+            let len = ids.len();
+            let fsl = FixedSizeListArray::new(
+                Arc::clone(fsl_field),
+                value_length,
+                Arc::new(NullArray::new(len * value_length as usize)),
+                None,
+            );
+            RecordBatch::try_new(
+                Arc::clone(schema),
+                vec![
+                    Arc::new(UInt32Array::from(ids)),
+                    Arc::new(fsl),
+                    Arc::new(Int32Array::from(scores)),
+                ],
+            )
+            .unwrap()
+        }
+
+        let left = TestMemoryExec::try_new_exec(
+            &[vec![
+                build_left_batch(
+                    &left_schema,
+                    &fsl_field,
+                    vec![0, 1],
+                    vec![10, 20],
+                    VALUE_LENGTH,
+                ),
+                build_left_batch(
+                    &left_schema,
+                    &fsl_field,
+                    vec![2, 3],
+                    vec![30, 5],
+                    VALUE_LENGTH,
+                ),
+            ]],
+            Arc::clone(&left_schema),
+            None,
+        )?;
+
+        // Probe-side: ids 1,2,3 with scores 15,15,15
+        let right_schema = Arc::new(Schema::new(vec![
+            Field::new("id_right", DataType::UInt32, false),
+            Field::new("score_right", DataType::Int32, false),
+        ]));
+        let right_batch = RecordBatch::try_new(
+            Arc::clone(&right_schema),
+            vec![
+                Arc::new(UInt32Array::from(vec![1, 2, 3])),
+                Arc::new(Int32Array::from(vec![15, 15, 15])),
+            ],
+        )?;
+        let right = TestMemoryExec::try_new_exec(
+            &[vec![right_batch]],
+            Arc::clone(&right_schema),
+            None,
+        )?;
+
+        let on = vec![(
+            Arc::new(Column::new_with_schema("id_left", &left.schema())?) as _,
+            Arc::new(Column::new_with_schema("id_right", &right.schema())?) as _,
+        )];
+
+        // Filter: score_left > score_right
+        // Match id=1: score 20 > 15 → kept
+        // Match id=2: score 30 > 15 → kept
+        // Match id=3: score  5 > 15 → filtered out
+        let filter = JoinFilter::new(
+            Arc::new(BinaryExpr::new(
+                Arc::new(Column::new("score_left", 0)),
+                Operator::Gt,
+                Arc::new(Column::new("score_right", 1)),
+            )),
+            vec![
+                ColumnIndex {
+                    index: 2,
+                    side: JoinSide::Left,
+                },
+                ColumnIndex {
+                    index: 1,
+                    side: JoinSide::Right,
+                },
+            ],
+            Arc::new(Schema::new(vec![
+                Field::new("score_left", DataType::Int32, false),
+                Field::new("score_right", DataType::Int32, false),
+            ])),
+        );
+
+        let join = join_with_filter(
+            left,
+            right,
+            on,
+            filter,
+            &JoinType::Full,
+            NullEquality::NullEqualsNothing,
+        )?;
+
+        let batches = common::collect(join.execute(0, task_ctx)?).await?;
+        let total_rows = batches.iter().map(RecordBatch::num_rows).sum::<usize>();
+
+        // Expected: 6 rows total
+        //   id=0: unmatched left          → (0, fsl, 10, NULL, NULL)
+        //   id=1: matched, filter passes  → (1, fsl, 20, 1, 15)
+        //   id=2: matched, filter passes  → (2, fsl, 30, 2, 15)
+        //   id=3: unmatched left (filter) → (3, fsl, 5, NULL, NULL)
+        //   id=3: unmatched right(filter) → (NULL, NULL, NULL, 3, 15)
+        //   (no unmatched right for id=1,2 since filter passed)
+        assert_eq!(total_rows, 5);
+
+        let mut matched_pairs = Vec::new();
+        let mut left_only_ids = Vec::new();
+        let mut right_only_ids = Vec::new();
+        for batch in &batches {
+            let left_ids = batch
+                .column(0)
+                .as_any()
+                .downcast_ref::<UInt32Array>()
+                .unwrap();
+            let right_ids = batch
+                .column(3)
+                .as_any()
+                .downcast_ref::<UInt32Array>()
+                .unwrap();
+            for row in 0..batch.num_rows() {
+                let left_null = left_ids.is_null(row);
+                let right_null = right_ids.is_null(row);
+                if !left_null && !right_null {
+                    matched_pairs.push((left_ids.value(row), right_ids.value(row)));
+                } else if !left_null {
+                    left_only_ids.push(left_ids.value(row));
+                } else {
+                    right_only_ids.push(right_ids.value(row));
+                }
+            }
+        }
+
+        matched_pairs.sort_unstable();
+        left_only_ids.sort_unstable();
+        right_only_ids.sort_unstable();
+
+        assert_eq!(matched_pairs, vec![(1, 1), (2, 2)]);
+        assert_eq!(left_only_ids, vec![0, 3]);
+        assert_eq!(right_only_ids, vec![3]);
+
+        Ok(())
     }
 
     #[apply(hash_join_exec_configs)]
@@ -4338,12 +4795,15 @@ mod tests {
             key_column.evaluate(&right)?.into_array(right.num_rows())?;
         let mut hashes_buffer = vec![0; right.num_rows()];
         create_hashes([&right_keys_values], &random_state, &mut hashes_buffer)?;
+        let left_keys_values = vec![vec![left_keys_values]];
+        let left_batch_offsets = vec![0, left.num_rows()];
 
         let mut probe_indices_buffer = Vec::new();
         let mut build_indices_buffer = Vec::new();
         let (l, r, _) = lookup_join_hashmap(
             &join_hash_map,
-            &[left_keys_values],
+            &left_keys_values,
+            &left_batch_offsets,
             &[right_keys_values],
             NullEquality::NullEqualsNothing,
             &hashes_buffer,
@@ -4399,12 +4859,15 @@ mod tests {
             key_column.evaluate(&right)?.into_array(right.num_rows())?;
         let mut hashes_buffer = vec![0; right.num_rows()];
         create_hashes([&right_keys_values], &random_state, &mut hashes_buffer)?;
+        let left_keys_values = vec![vec![left_keys_values]];
+        let left_batch_offsets = vec![0, left.num_rows()];
 
         let mut probe_indices_buffer = Vec::new();
         let mut build_indices_buffer = Vec::new();
         let (l, r, _) = lookup_join_hashmap(
             &join_hash_map,
-            &[left_keys_values],
+            &left_keys_values,
+            &left_batch_offsets,
             &[right_keys_values],
             NullEquality::NullEqualsNothing,
             &hashes_buffer,

@@ -42,7 +42,7 @@ pub use crate::joins::{JoinOn, JoinOnRef};
 use arrow::array::{
     Array, ArrowPrimitiveType, BooleanBufferBuilder, NativeAdapter, PrimitiveArray,
     RecordBatch, RecordBatchOptions, UInt32Array, UInt32Builder, UInt64Array,
-    builder::UInt64Builder, downcast_array, new_null_array,
+    builder::UInt64Builder, downcast_array, new_empty_array, new_null_array,
 };
 use arrow::array::{
     ArrayRef, BinaryArray, BinaryViewArray, BooleanArray, Date32Array, Date64Array,
@@ -53,7 +53,7 @@ use arrow::array::{
 };
 use arrow::buffer::{BooleanBuffer, NullBuffer};
 use arrow::compute::kernels::cmp::eq;
-use arrow::compute::{self, FilterBuilder, and, take};
+use arrow::compute::{self, FilterBuilder, and, interleave, take};
 use arrow::datatypes::{
     ArrowNativeType, Field, Schema, SchemaBuilder, UInt32Type, UInt64Type,
 };
@@ -65,7 +65,7 @@ use datafusion_common::hash_utils::create_hashes;
 use datafusion_common::stats::Precision;
 use datafusion_common::{
     DataFusionError, JoinSide, JoinType, NullEquality, Result, SharedResult,
-    not_impl_err, plan_err,
+    internal_err, not_impl_err, plan_err,
 };
 use datafusion_expr::Operator;
 use datafusion_expr::interval_arithmetic::Interval;
@@ -981,6 +981,83 @@ pub(crate) fn apply_join_filter_to_indices(
     ))
 }
 
+#[expect(clippy::too_many_arguments)]
+pub(crate) fn apply_join_filter_to_indices_from_batches(
+    build_batches: &[RecordBatch],
+    build_schema: &Schema,
+    build_batch_offsets: &[usize],
+    probe_batch: &RecordBatch,
+    build_indices: UInt64Array,
+    probe_indices: UInt32Array,
+    filter: &JoinFilter,
+    build_side: JoinSide,
+    max_intermediate_size: Option<usize>,
+    join_type: JoinType,
+) -> Result<(UInt64Array, UInt32Array)> {
+    if build_indices.is_empty() && probe_indices.is_empty() {
+        return Ok((build_indices, probe_indices));
+    };
+
+    let filter_result = if let Some(max_size) = max_intermediate_size {
+        let mut filter_results =
+            Vec::with_capacity(build_indices.len().div_ceil(max_size));
+
+        for i in (0..build_indices.len()).step_by(max_size) {
+            let end = min(build_indices.len(), i + max_size);
+            let len = end - i;
+            let intermediate_batch = build_batch_from_indices_from_batches(
+                filter.schema(),
+                build_batches,
+                build_schema,
+                build_batch_offsets,
+                probe_batch,
+                &build_indices.slice(i, len),
+                &probe_indices.slice(i, len),
+                filter.column_indices(),
+                build_side,
+                join_type,
+            )?;
+            let filter_result = filter
+                .expression()
+                .evaluate(&intermediate_batch)?
+                .into_array(intermediate_batch.num_rows())?;
+            filter_results.push(filter_result);
+        }
+
+        let filter_refs: Vec<&dyn Array> =
+            filter_results.iter().map(|a| a.as_ref()).collect();
+
+        compute::concat(&filter_refs)?
+    } else {
+        let intermediate_batch = build_batch_from_indices_from_batches(
+            filter.schema(),
+            build_batches,
+            build_schema,
+            build_batch_offsets,
+            probe_batch,
+            &build_indices,
+            &probe_indices,
+            filter.column_indices(),
+            build_side,
+            join_type,
+        )?;
+
+        filter
+            .expression()
+            .evaluate(&intermediate_batch)?
+            .into_array(intermediate_batch.num_rows())?
+    };
+
+    let mask = as_boolean_array(&filter_result)?;
+
+    let left_filtered = compute::filter(&build_indices, mask)?;
+    let right_filtered = compute::filter(&probe_indices, mask)?;
+    Ok((
+        downcast_array(left_filtered.as_ref()),
+        downcast_array(right_filtered.as_ref()),
+    ))
+}
+
 /// Creates a [RecordBatch] with zero columns but the given row count.
 /// Used when a join has an empty projection (e.g. `SELECT count(1) ...`).
 fn new_empty_schema_batch(schema: &Schema, row_count: usize) -> Result<RecordBatch> {
@@ -1048,6 +1125,68 @@ pub(crate) fn build_batch_from_indices(
 
         columns.push(array);
     }
+    Ok(RecordBatch::try_new(Arc::new(schema.clone()), columns)?)
+}
+
+#[expect(clippy::too_many_arguments)]
+pub(crate) fn build_batch_from_indices_from_batches(
+    schema: &Schema,
+    build_batches: &[RecordBatch],
+    build_schema: &Schema,
+    build_batch_offsets: &[usize],
+    probe_batch: &RecordBatch,
+    build_indices: &UInt64Array,
+    probe_indices: &UInt32Array,
+    column_indices: &[ColumnIndex],
+    build_side: JoinSide,
+    join_type: JoinType,
+) -> Result<RecordBatch> {
+    if schema.fields().is_empty() {
+        let row_count = match join_type {
+            JoinType::RightAnti | JoinType::RightSemi => probe_indices.len(),
+            _ => build_indices.len(),
+        };
+        return new_empty_schema_batch(schema, row_count);
+    }
+
+    let mut columns: Vec<Arc<dyn Array>> = Vec::with_capacity(schema.fields().len());
+
+    for column_index in column_indices {
+        let array = if column_index.side == JoinSide::None {
+            Arc::new(compute::is_not_null(probe_indices)?)
+        } else if column_index.side == build_side {
+            if build_batches.is_empty()
+                || build_indices.null_count() == build_indices.len()
+            {
+                assert_eq!(build_indices.null_count(), build_indices.len());
+                new_null_array(
+                    build_schema.field(column_index.index).data_type(),
+                    build_indices.len(),
+                )
+            } else {
+                let build_arrays = build_batches
+                    .iter()
+                    .map(|batch| Arc::clone(batch.column(column_index.index)))
+                    .collect::<Vec<_>>();
+                take_array_from_batches(
+                    &build_arrays,
+                    build_batch_offsets,
+                    build_indices,
+                )?
+            }
+        } else {
+            let array = probe_batch.column(column_index.index);
+            if array.is_empty() || probe_indices.null_count() == probe_indices.len() {
+                assert_eq!(probe_indices.null_count(), probe_indices.len());
+                new_null_array(array.data_type(), probe_indices.len())
+            } else {
+                take(array.as_ref(), probe_indices, None)?
+            }
+        };
+
+        columns.push(array);
+    }
+
     Ok(RecordBatch::try_new(Arc::new(schema.clone()), columns)?)
 }
 
@@ -1743,11 +1882,34 @@ pub fn update_hash(
     // evaluate the keys
     let keys_values = evaluate_expressions_to_arrays(on, batch)?;
 
+    update_hash_with_values(
+        &keys_values,
+        batch.num_rows(),
+        hash_map,
+        offset,
+        random_state,
+        hashes_buffer,
+        deleted_offset,
+        fifo_hashmap,
+    )
+}
+
+#[expect(clippy::too_many_arguments)]
+pub(crate) fn update_hash_with_values(
+    keys_values: &[ArrayRef],
+    num_rows: usize,
+    hash_map: &mut dyn JoinHashMapType,
+    offset: usize,
+    random_state: &RandomState,
+    hashes_buffer: &mut [u64],
+    deleted_offset: usize,
+    fifo_hashmap: bool,
+) -> Result<()> {
     // calculate the hash values
-    let hash_values = create_hashes(&keys_values, random_state, hashes_buffer)?;
+    let hash_values = create_hashes(keys_values, random_state, hashes_buffer)?;
 
     // For usual JoinHashmap, the implementation is void.
-    hash_map.extend_zero(batch.num_rows());
+    hash_map.extend_zero(num_rows);
 
     // Updating JoinHashMap from hash values iterator
     let hash_values_iter = hash_values
@@ -1762,6 +1924,162 @@ pub fn update_hash(
     }
 
     Ok(())
+}
+
+fn contains_fixed_size_list(data_type: &DataType) -> bool {
+    match data_type {
+        DataType::FixedSizeList(_, _) => true,
+        DataType::List(field)
+        | DataType::ListView(field)
+        | DataType::LargeList(field)
+        | DataType::LargeListView(field)
+        | DataType::Map(field, _) => contains_fixed_size_list(field.data_type()),
+        DataType::Struct(fields) => fields
+            .iter()
+            .any(|field| contains_fixed_size_list(field.data_type())),
+        DataType::Union(fields, _) => fields
+            .iter()
+            .any(|(_, field)| contains_fixed_size_list(field.data_type())),
+        DataType::Dictionary(_, value_type) => contains_fixed_size_list(value_type),
+        DataType::RunEndEncoded(_, values_field) => {
+            contains_fixed_size_list(values_field.data_type())
+        }
+        _ => false,
+    }
+}
+
+fn locate_record_batch(
+    batch_offsets: &[usize],
+    row_index: usize,
+) -> Result<(usize, usize)> {
+    let total_rows = batch_offsets
+        .last()
+        .copied()
+        .ok_or_else(|| DataFusionError::Internal("missing batch offsets".to_string()))?;
+    if row_index >= total_rows {
+        return internal_err!(
+            "row index {row_index} is out of bounds for build side of size {total_rows}"
+        );
+    }
+
+    let upper_bound = batch_offsets.partition_point(|offset| *offset <= row_index);
+    let batch_index = upper_bound - 1;
+    Ok((batch_index, row_index - batch_offsets[batch_index]))
+}
+
+fn take_array_from_batches(
+    arrays: &[ArrayRef],
+    batch_offsets: &[usize],
+    indices: &UInt64Array,
+) -> Result<ArrayRef> {
+    let first_array = arrays.first().ok_or_else(|| {
+        DataFusionError::Internal("missing build-side arrays".to_string())
+    })?;
+
+    if indices.is_empty() {
+        return Ok(new_empty_array(first_array.data_type()));
+    }
+
+    if arrays.len() == 1
+        && indices.null_count() == 0
+        && !contains_fixed_size_list(first_array.data_type())
+    {
+        return Ok(take(first_array.as_ref(), indices, None)?);
+    }
+
+    let mut sources: Vec<&dyn Array> =
+        arrays.iter().map(|array| array.as_ref()).collect();
+    let null_array =
+        (indices.null_count() > 0).then(|| new_null_array(first_array.data_type(), 1));
+    let null_source = null_array.as_ref().map(|array| {
+        let index = sources.len();
+        sources.push(array.as_ref());
+        index
+    });
+
+    let mut interleave_indices = Vec::with_capacity(indices.len());
+    for index in indices.iter() {
+        match index {
+            Some(index) => {
+                let (batch_index, local_index) =
+                    locate_record_batch(batch_offsets, index as usize)?;
+                interleave_indices.push((batch_index, local_index));
+            }
+            None => {
+                interleave_indices.push((null_source.expect("null source"), 0));
+            }
+        }
+    }
+
+    Ok(interleave(&sources, &interleave_indices)?)
+}
+
+pub(crate) fn value_is_null_from_batches(
+    batch_offsets: &[usize],
+    values_by_batch: &[Vec<ArrayRef>],
+    value_index: usize,
+    row_index: usize,
+) -> Result<bool> {
+    let (batch_index, local_index) = locate_record_batch(batch_offsets, row_index)?;
+    Ok(values_by_batch[batch_index][value_index].is_null(local_index))
+}
+
+pub(super) fn equal_rows_arr_from_batches(
+    indices_left: &UInt64Array,
+    indices_right: &UInt32Array,
+    left_arrays: &[Vec<ArrayRef>],
+    left_batch_offsets: &[usize],
+    right_arrays: &[ArrayRef],
+    null_equality: NullEquality,
+) -> Result<(UInt64Array, UInt32Array)> {
+    if indices_left.is_empty() || right_arrays.is_empty() {
+        return Ok((Vec::<u64>::new().into(), Vec::<u32>::new().into()));
+    }
+
+    let left_arrays_per_key = left_arrays
+        .first()
+        .ok_or_else(|| {
+            DataFusionError::Internal("missing build-side key arrays".to_string())
+        })?
+        .len();
+    debug_assert_eq!(left_arrays_per_key, right_arrays.len());
+
+    let mut left_key_arrays = left_arrays
+        .iter()
+        .map(|arrays| Arc::clone(&arrays[0]))
+        .collect::<Vec<_>>();
+    let arr_left =
+        take_array_from_batches(&left_key_arrays, left_batch_offsets, indices_left)?;
+    let arr_right = take(right_arrays[0].as_ref(), indices_right, None)?;
+
+    let mut equal: BooleanArray =
+        eq_dyn_null(arr_left.as_ref(), arr_right.as_ref(), null_equality)?;
+
+    for value_index in 1..right_arrays.len() {
+        left_key_arrays.clear();
+        left_key_arrays.extend(
+            left_arrays
+                .iter()
+                .map(|arrays| Arc::clone(&arrays[value_index])),
+        );
+
+        let arr_left =
+            take_array_from_batches(&left_key_arrays, left_batch_offsets, indices_left)?;
+        let arr_right = take(right_arrays[value_index].as_ref(), indices_right, None)?;
+        let equal_next =
+            eq_dyn_null(arr_left.as_ref(), arr_right.as_ref(), null_equality)?;
+        equal = and(&equal, &equal_next)?;
+    }
+
+    let filter_builder = FilterBuilder::new(&equal).optimize().build();
+
+    let left_filtered = filter_builder.filter(indices_left)?;
+    let right_filtered = filter_builder.filter(indices_right)?;
+
+    Ok((
+        downcast_array(left_filtered.as_ref()),
+        downcast_array(right_filtered.as_ref()),
+    ))
 }
 
 pub(super) fn equal_rows_arr(
@@ -1926,8 +2244,8 @@ mod tests {
 
     use super::*;
 
-    use arrow::array::Int32Array;
-    use arrow::datatypes::{DataType, Fields};
+    use arrow::array::{FixedSizeListArray, Int32Array, UInt64Array};
+    use arrow::datatypes::{DataType, Field, Fields};
     use arrow::error::{ArrowError, Result as ArrowResult};
     use datafusion_common::stats::Precision::{Absent, Exact, Inexact};
     use datafusion_common::{ScalarValue, arrow_datafusion_err, arrow_err};
@@ -2007,6 +2325,90 @@ mod tests {
             arrow_datafusion_err!(ArrowError::CsvError("some error".to_owned()));
 
         assert!(matches!(root_err, _expected))
+    }
+
+    #[test]
+    fn test_contains_fixed_size_list_nested_types() {
+        let value_field = Arc::new(Field::new("item", DataType::Int32, false));
+        let fixed_size_list = DataType::FixedSizeList(Arc::clone(&value_field), 2);
+        let nested_struct = DataType::Struct(
+            vec![
+                Arc::new(Field::new("plain", DataType::Int32, false)),
+                Arc::new(Field::new("nested", fixed_size_list.clone(), false)),
+            ]
+            .into(),
+        );
+
+        assert!(!contains_fixed_size_list(&DataType::Int32));
+        assert!(contains_fixed_size_list(&fixed_size_list));
+        assert!(contains_fixed_size_list(&nested_struct));
+        assert!(contains_fixed_size_list(&DataType::List(Arc::new(
+            Field::new("list_item", fixed_size_list, true,)
+        ))));
+    }
+
+    #[test]
+    fn test_locate_record_batch_boundaries() -> Result<()> {
+        let offsets = vec![0, 2, 5, 9];
+
+        assert_eq!(locate_record_batch(&offsets, 0)?, (0, 0));
+        assert_eq!(locate_record_batch(&offsets, 1)?, (0, 1));
+        assert_eq!(locate_record_batch(&offsets, 2)?, (1, 0));
+        assert_eq!(locate_record_batch(&offsets, 4)?, (1, 2));
+        assert_eq!(locate_record_batch(&offsets, 5)?, (2, 0));
+        assert_eq!(locate_record_batch(&offsets, 8)?, (2, 3));
+
+        assert!(locate_record_batch(&offsets, 9).is_err());
+        assert!(locate_record_batch(&[], 0).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn test_take_array_from_batches_multi_batch_with_nulls() -> Result<()> {
+        let arrays = vec![
+            Arc::new(Int32Array::from(vec![10, 20])) as ArrayRef,
+            Arc::new(Int32Array::from(vec![30, 40])) as ArrayRef,
+        ];
+        let indices = UInt64Array::from(vec![Some(3), None, Some(0), Some(2)]);
+        let taken = take_array_from_batches(&arrays, &[0, 2, 4], &indices)?;
+        let taken = taken.as_any().downcast_ref::<Int32Array>().unwrap();
+
+        assert_eq!(taken.len(), 4);
+        assert_eq!(taken.value(0), 40);
+        assert!(taken.is_null(1));
+        assert_eq!(taken.value(2), 10);
+        assert_eq!(taken.value(3), 30);
+        Ok(())
+    }
+
+    #[test]
+    fn test_take_array_from_batches_fixed_size_list() -> Result<()> {
+        let value_field = Arc::new(Field::new("item", DataType::Int32, false));
+        let batch_1 = Arc::new(FixedSizeListArray::new(
+            Arc::clone(&value_field),
+            2,
+            Arc::new(Int32Array::from(vec![0, 1, 10, 11])),
+            None,
+        )) as ArrayRef;
+        let batch_2 = Arc::new(FixedSizeListArray::new(
+            Arc::clone(&value_field),
+            2,
+            Arc::new(Int32Array::from(vec![20, 21, 30, 31])),
+            None,
+        )) as ArrayRef;
+
+        let taken = take_array_from_batches(
+            &[batch_1, batch_2],
+            &[0, 2, 4],
+            &UInt64Array::from(vec![2, 1, 3, 0]),
+        )?;
+        let taken = taken.as_any().downcast_ref::<FixedSizeListArray>().unwrap();
+        let values = taken.values();
+        let values = values.as_any().downcast_ref::<Int32Array>().unwrap();
+
+        assert_eq!(taken.len(), 4);
+        assert_eq!(values.values(), &[20, 21, 10, 11, 30, 31, 0, 1]);
+        Ok(())
     }
 
     #[test]
