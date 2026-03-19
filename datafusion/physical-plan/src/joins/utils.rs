@@ -46,10 +46,11 @@ use arrow::array::{
 };
 use arrow::array::{
     ArrayRef, BinaryArray, BinaryViewArray, BooleanArray, Date32Array, Date64Array,
-    Decimal128Array, FixedSizeBinaryArray, Float32Array, Float64Array, Int8Array,
-    Int16Array, Int32Array, Int64Array, LargeBinaryArray, LargeStringArray, StringArray,
-    StringViewArray, TimestampMicrosecondArray, TimestampMillisecondArray,
-    TimestampNanosecondArray, TimestampSecondArray, UInt8Array, UInt16Array,
+    Decimal128Array, FixedSizeBinaryArray, FixedSizeListArray, Float32Array,
+    Float64Array, Int8Array, Int16Array, Int32Array, Int64Array, LargeBinaryArray,
+    LargeStringArray, StringArray, StringViewArray, TimestampMicrosecondArray,
+    TimestampMillisecondArray, TimestampNanosecondArray, TimestampSecondArray,
+    UInt8Array, UInt16Array,
 };
 use arrow::buffer::{BooleanBuffer, NullBuffer};
 use arrow::compute::kernels::cmp::eq;
@@ -1150,6 +1151,7 @@ pub(crate) fn build_batch_from_indices_from_batches(
     }
 
     let mut columns: Vec<Arc<dyn Array>> = Vec::with_capacity(schema.fields().len());
+    let mut prepared_build_indices = None;
 
     for column_index in column_indices {
         let array = if column_index.side == JoinSide::None {
@@ -1168,10 +1170,20 @@ pub(crate) fn build_batch_from_indices_from_batches(
                     .iter()
                     .map(|batch| Arc::clone(batch.column(column_index.index)))
                     .collect::<Vec<_>>();
-                take_array_from_batches(
+                if prepared_build_indices.is_none() {
+                    prepared_build_indices =
+                        Some(prepare_take_indices(build_batch_offsets, build_indices)?);
+                }
+                let prepared_build_indices =
+                    prepared_build_indices.as_mut().ok_or_else(|| {
+                        DataFusionError::Internal(
+                            "missing prepared build indices".to_string(),
+                        )
+                    })?;
+                take_array_from_batches_with_prepared_indices(
                     &build_arrays,
-                    build_batch_offsets,
                     build_indices,
+                    prepared_build_indices,
                 )?
             }
         } else {
@@ -1967,10 +1979,230 @@ fn locate_record_batch(
     Ok((batch_index, row_index - batch_offsets[batch_index]))
 }
 
-fn take_array_from_batches(
-    arrays: &[ArrayRef],
+#[derive(Debug)]
+enum CachedMaxLocalIndex {
+    Unknown,
+    Known(Option<u64>),
+}
+
+#[derive(Debug)]
+struct SingleSourceTakeIndices {
+    total_rows: usize,
+    max_local_index: CachedMaxLocalIndex,
+}
+
+#[derive(Debug)]
+struct ResolvedSingleBatchTakeIndices {
+    batch_index: usize,
+    max_local_index: Option<u64>,
+    local_indices: Option<UInt64Array>,
+}
+
+#[derive(Debug)]
+struct ResolvedTakeIndices {
+    source_count: usize,
+    interleave_indices: Vec<(usize, usize)>,
+    single_batch: Option<ResolvedSingleBatchTakeIndices>,
+}
+
+#[derive(Debug)]
+enum PreparedTakeIndices {
+    SingleSource(SingleSourceTakeIndices),
+    Resolved(ResolvedTakeIndices),
+}
+
+fn max_index_in_bounds(indices: &UInt64Array, total_rows: usize) -> Result<Option<u64>> {
+    let mut max_index: Option<u64> = None;
+
+    for index in indices.iter().flatten() {
+        let index_usize = usize::try_from(index).map_err(|_| {
+            DataFusionError::Internal(format!(
+                "row index {index} is out of bounds for build side of size {total_rows}"
+            ))
+        })?;
+        if index_usize >= total_rows {
+            return internal_err!(
+                "row index {index} is out of bounds for build side of size {total_rows}"
+            );
+        }
+        max_index = Some(match max_index {
+            Some(max_index) => max_index.max(index),
+            None => index,
+        });
+    }
+
+    Ok(max_index)
+}
+
+fn prepare_take_indices(
     batch_offsets: &[usize],
     indices: &UInt64Array,
+) -> Result<PreparedTakeIndices> {
+    let source_count = batch_offsets
+        .len()
+        .checked_sub(1)
+        .ok_or_else(|| DataFusionError::Internal("missing batch offsets".to_string()))?;
+
+    if source_count == 0 {
+        return internal_err!("missing build-side arrays");
+    }
+
+    if source_count == 1 {
+        return Ok(PreparedTakeIndices::SingleSource(SingleSourceTakeIndices {
+            total_rows: batch_offsets[1],
+            max_local_index: CachedMaxLocalIndex::Unknown,
+        }));
+    }
+
+    Ok(PreparedTakeIndices::Resolved(resolve_take_indices(
+        batch_offsets,
+        indices,
+    )?))
+}
+
+fn resolve_take_indices(
+    batch_offsets: &[usize],
+    indices: &UInt64Array,
+) -> Result<ResolvedTakeIndices> {
+    let source_count = batch_offsets
+        .len()
+        .checked_sub(1)
+        .ok_or_else(|| DataFusionError::Internal("missing batch offsets".to_string()))?;
+    let null_source_index = source_count;
+
+    let mut interleave_indices = Vec::with_capacity(indices.len());
+    let mut max_local_index: Option<u64> = None;
+    let mut single_batch_index = None;
+    let mut single_batch = true;
+
+    for index in indices.iter() {
+        match index {
+            Some(index) => {
+                let (batch_index, local_index) =
+                    locate_record_batch(batch_offsets, index as usize)?;
+                interleave_indices.push((batch_index, local_index));
+
+                let local_index = local_index as u64;
+                max_local_index = Some(match max_local_index {
+                    Some(max_local_index) => max_local_index.max(local_index),
+                    None => local_index,
+                });
+
+                if let Some(existing_batch_index) = single_batch_index {
+                    single_batch &= existing_batch_index == batch_index;
+                } else {
+                    single_batch_index = Some(batch_index);
+                }
+            }
+            None => interleave_indices.push((null_source_index, 0)),
+        }
+    }
+
+    let single_batch = if single_batch {
+        single_batch_index.map(|batch_index| ResolvedSingleBatchTakeIndices {
+            batch_index,
+            max_local_index,
+            local_indices: None,
+        })
+    } else {
+        None
+    };
+
+    Ok(ResolvedTakeIndices {
+        source_count,
+        interleave_indices,
+        single_batch,
+    })
+}
+
+fn build_single_batch_local_indices(
+    interleave_indices: &[(usize, usize)],
+    indices: &UInt64Array,
+) -> UInt64Array {
+    let mut local_indices = UInt64Builder::with_capacity(indices.len());
+    for (index, (_, local_index)) in indices.iter().zip(interleave_indices.iter()) {
+        match index {
+            Some(_) => local_indices.append_value(*local_index as u64),
+            None => local_indices.append_null(),
+        }
+    }
+    local_indices.finish()
+}
+
+fn can_take_single_batch_array(array: &dyn Array, max_local_index: Option<u64>) -> bool {
+    if !contains_fixed_size_list(array.data_type()) {
+        return true;
+    }
+
+    let Some(list) = array.as_any().downcast_ref::<FixedSizeListArray>() else {
+        return false;
+    };
+
+    if contains_fixed_size_list(&list.value_type()) {
+        return false;
+    }
+
+    let Some(max_local_index) = max_local_index else {
+        return true;
+    };
+
+    let Some(row_count) = max_local_index.checked_add(1) else {
+        return false;
+    };
+    let Ok(value_length) = u64::try_from(list.value_length()) else {
+        return false;
+    };
+
+    row_count
+        .checked_mul(value_length)
+        .is_some_and(|value_count| value_count <= u32::MAX as u64)
+}
+
+fn single_source_max_local_index(
+    single_source: &mut SingleSourceTakeIndices,
+    indices: &UInt64Array,
+) -> Result<Option<u64>> {
+    if let CachedMaxLocalIndex::Known(max_local_index) = single_source.max_local_index {
+        return Ok(max_local_index);
+    }
+
+    let max_local_index = max_index_in_bounds(indices, single_source.total_rows)?;
+    single_source.max_local_index = CachedMaxLocalIndex::Known(max_local_index);
+    Ok(max_local_index)
+}
+
+fn interleave_single_source_array(
+    array: &dyn Array,
+    indices: &UInt64Array,
+) -> Result<ArrayRef> {
+    if indices.is_empty() {
+        return Ok(new_empty_array(array.data_type()));
+    }
+
+    let mut sources = vec![array];
+    let null_array =
+        (indices.null_count() > 0).then(|| new_null_array(array.data_type(), 1));
+    let null_source = null_array.as_ref().map(|null_array| {
+        let index = sources.len();
+        sources.push(null_array.as_ref());
+        index
+    });
+
+    let mut interleave_indices = Vec::with_capacity(indices.len());
+    for index in indices.iter() {
+        match index {
+            Some(index) => interleave_indices.push((0, index as usize)),
+            None => interleave_indices.push((null_source.expect("null source"), 0)),
+        }
+    }
+
+    Ok(interleave(&sources, &interleave_indices)?)
+}
+
+fn take_array_from_batches_with_prepared_indices(
+    arrays: &[ArrayRef],
+    indices: &UInt64Array,
+    prepared_indices: &mut PreparedTakeIndices,
 ) -> Result<ArrayRef> {
     let first_array = arrays.first().ok_or_else(|| {
         DataFusionError::Internal("missing build-side arrays".to_string())
@@ -1980,38 +2212,100 @@ fn take_array_from_batches(
         return Ok(new_empty_array(first_array.data_type()));
     }
 
-    if arrays.len() == 1
-        && indices.null_count() == 0
-        && !contains_fixed_size_list(first_array.data_type())
-    {
-        return Ok(take(first_array.as_ref(), indices, None)?);
-    }
-
-    let mut sources: Vec<&dyn Array> =
-        arrays.iter().map(|array| array.as_ref()).collect();
-    let null_array =
-        (indices.null_count() > 0).then(|| new_null_array(first_array.data_type(), 1));
-    let null_source = null_array.as_ref().map(|array| {
-        let index = sources.len();
-        sources.push(array.as_ref());
-        index
-    });
-
-    let mut interleave_indices = Vec::with_capacity(indices.len());
-    for index in indices.iter() {
-        match index {
-            Some(index) => {
-                let (batch_index, local_index) =
-                    locate_record_batch(batch_offsets, index as usize)?;
-                interleave_indices.push((batch_index, local_index));
+    match prepared_indices {
+        PreparedTakeIndices::SingleSource(single_source) => {
+            if arrays.len() != 1 {
+                return internal_err!(
+                    "single-source indices expect 1 build-side array but found {}",
+                    arrays.len()
+                );
             }
-            None => {
-                interleave_indices.push((null_source.expect("null source"), 0));
+            let array = arrays[0].as_ref();
+            if !contains_fixed_size_list(array.data_type()) {
+                return Ok(take(array, indices, None)?);
             }
+
+            let max_local_index = single_source_max_local_index(single_source, indices)?;
+            if can_take_single_batch_array(array, max_local_index) {
+                return Ok(take(array, indices, None)?);
+            }
+
+            interleave_single_source_array(array, indices)
+        }
+        PreparedTakeIndices::Resolved(resolved_indices) => {
+            if resolved_indices.source_count != arrays.len() {
+                return internal_err!(
+                    "resolved indices expect {} build-side arrays but found {}",
+                    resolved_indices.source_count,
+                    arrays.len()
+                );
+            }
+
+            let single_batch_index =
+                resolved_indices
+                    .single_batch
+                    .as_ref()
+                    .and_then(|single_batch| {
+                        arrays
+                            .get(single_batch.batch_index)
+                            .filter(|array| {
+                                can_take_single_batch_array(
+                                    array.as_ref(),
+                                    single_batch.max_local_index,
+                                )
+                            })
+                            .map(|_| single_batch.batch_index)
+                    });
+
+            if let Some(batch_index) = single_batch_index {
+                let array = arrays.get(batch_index).ok_or_else(|| {
+                    DataFusionError::Internal(
+                        "invalid single-batch take index".to_string(),
+                    )
+                })?;
+                let ResolvedTakeIndices {
+                    interleave_indices,
+                    single_batch,
+                    ..
+                } = resolved_indices;
+                let local_indices = if let Some(single_batch) = single_batch.as_mut() {
+                    if single_batch.local_indices.is_none() {
+                        single_batch.local_indices = Some(
+                            build_single_batch_local_indices(interleave_indices, indices),
+                        );
+                    }
+                    single_batch.local_indices.as_ref().ok_or_else(|| {
+                        DataFusionError::Internal(
+                            "missing local indices for single-batch take".to_string(),
+                        )
+                    })?
+                } else {
+                    return internal_err!("missing single-batch indices for take");
+                };
+                return Ok(take(array.as_ref(), local_indices, None)?);
+            }
+
+            let mut sources: Vec<&dyn Array> =
+                arrays.iter().map(|array| array.as_ref()).collect();
+            let null_array = (indices.null_count() > 0)
+                .then(|| new_null_array(first_array.data_type(), 1));
+            if let Some(array) = null_array.as_ref() {
+                sources.push(array.as_ref());
+            }
+
+            Ok(interleave(&sources, &resolved_indices.interleave_indices)?)
         }
     }
+}
 
-    Ok(interleave(&sources, &interleave_indices)?)
+#[cfg(test)]
+fn take_array_from_batches(
+    arrays: &[ArrayRef],
+    batch_offsets: &[usize],
+    indices: &UInt64Array,
+) -> Result<ArrayRef> {
+    let mut prepared_indices = prepare_take_indices(batch_offsets, indices)?;
+    take_array_from_batches_with_prepared_indices(arrays, indices, &mut prepared_indices)
 }
 
 pub(crate) fn value_is_null_from_batches(
@@ -2044,12 +2338,17 @@ pub(super) fn equal_rows_arr_from_batches(
         .len();
     debug_assert_eq!(left_arrays_per_key, right_arrays.len());
 
+    let mut prepared_left_indices =
+        prepare_take_indices(left_batch_offsets, indices_left)?;
     let mut left_key_arrays = left_arrays
         .iter()
         .map(|arrays| Arc::clone(&arrays[0]))
         .collect::<Vec<_>>();
-    let arr_left =
-        take_array_from_batches(&left_key_arrays, left_batch_offsets, indices_left)?;
+    let arr_left = take_array_from_batches_with_prepared_indices(
+        &left_key_arrays,
+        indices_left,
+        &mut prepared_left_indices,
+    )?;
     let arr_right = take(right_arrays[0].as_ref(), indices_right, None)?;
 
     let mut equal: BooleanArray =
@@ -2063,8 +2362,11 @@ pub(super) fn equal_rows_arr_from_batches(
                 .map(|arrays| Arc::clone(&arrays[value_index])),
         );
 
-        let arr_left =
-            take_array_from_batches(&left_key_arrays, left_batch_offsets, indices_left)?;
+        let arr_left = take_array_from_batches_with_prepared_indices(
+            &left_key_arrays,
+            indices_left,
+            &mut prepared_left_indices,
+        )?;
         let arr_right = take(right_arrays[value_index].as_ref(), indices_right, None)?;
         let equal_next =
             eq_dyn_null(arr_left.as_ref(), arr_right.as_ref(), null_equality)?;
@@ -2364,6 +2666,81 @@ mod tests {
     }
 
     #[test]
+    fn test_prepare_take_indices_single_source() -> Result<()> {
+        let prepared = prepare_take_indices(&[0, 3], &UInt64Array::from(vec![2, 0]))?;
+        let PreparedTakeIndices::SingleSource(single_source) = prepared else {
+            unreachable!("expected single-source indices");
+        };
+
+        assert_eq!(single_source.total_rows, 3);
+        assert!(matches!(
+            single_source.max_local_index,
+            CachedMaxLocalIndex::Unknown
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn test_resolve_take_indices_single_batch_with_nulls() -> Result<()> {
+        let indices = UInt64Array::from(vec![Some(3), None, Some(2)]);
+        let resolved = resolve_take_indices(&[0, 2, 5], &indices)?;
+
+        assert_eq!(resolved.source_count, 2);
+        assert_eq!(resolved.interleave_indices, vec![(1, 1), (2, 0), (1, 0)]);
+
+        let single_batch = resolved.single_batch.as_ref().unwrap();
+        assert_eq!(single_batch.batch_index, 1);
+        assert_eq!(single_batch.max_local_index, Some(1));
+
+        let local_indices =
+            build_single_batch_local_indices(&resolved.interleave_indices, &indices);
+        assert_eq!(
+            local_indices,
+            UInt64Array::from(vec![Some(1), None, Some(0)])
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_can_take_single_batch_array_fixed_size_list_threshold() {
+        let value_field = Arc::new(Field::new("item", DataType::Int32, false));
+        let list = FixedSizeListArray::new(
+            Arc::clone(&value_field),
+            2,
+            Arc::new(Int32Array::from(vec![0, 1, 2, 3])),
+            None,
+        );
+
+        assert!(can_take_single_batch_array(
+            &list,
+            Some((u32::MAX as u64 / 2) - 1)
+        ));
+        assert!(!can_take_single_batch_array(
+            &list,
+            Some(u32::MAX as u64 / 2)
+        ));
+
+        let nested_value_field = Arc::new(Field::new(
+            "item",
+            DataType::FixedSizeList(Arc::clone(&value_field), 2),
+            false,
+        ));
+        let nested_list = FixedSizeListArray::new(
+            nested_value_field,
+            2,
+            Arc::new(FixedSizeListArray::new(
+                value_field,
+                2,
+                Arc::new(Int32Array::from(vec![0, 1, 2, 3, 4, 5, 6, 7])),
+                None,
+            )),
+            None,
+        );
+        assert!(!can_take_single_batch_array(&nested_list, Some(0)));
+    }
+
+    #[test]
     fn test_take_array_from_batches_multi_batch_with_nulls() -> Result<()> {
         let arrays = vec![
             Arc::new(Int32Array::from(vec![10, 20])) as ArrayRef,
@@ -2378,6 +2755,81 @@ mod tests {
         assert!(taken.is_null(1));
         assert_eq!(taken.value(2), 10);
         assert_eq!(taken.value(3), 30);
+        Ok(())
+    }
+
+    #[test]
+    fn test_take_array_from_batches_single_batch_with_nulls() -> Result<()> {
+        let arrays = vec![
+            Arc::new(Int32Array::from(vec![10, 20])) as ArrayRef,
+            Arc::new(Int32Array::from(vec![30, 40, 50])) as ArrayRef,
+        ];
+        let indices = UInt64Array::from(vec![Some(3), None, Some(2), Some(4)]);
+        let taken = take_array_from_batches(&arrays, &[0, 2, 5], &indices)?;
+        let taken = taken.as_any().downcast_ref::<Int32Array>().unwrap();
+
+        assert_eq!(taken.len(), 4);
+        assert_eq!(taken.value(0), 40);
+        assert!(taken.is_null(1));
+        assert_eq!(taken.value(2), 30);
+        assert_eq!(taken.value(3), 50);
+        Ok(())
+    }
+
+    #[test]
+    fn test_take_array_from_batches_single_batch_fixed_size_list() -> Result<()> {
+        let value_field = Arc::new(Field::new("item", DataType::Int32, false));
+        let batch = Arc::new(FixedSizeListArray::new(
+            Arc::clone(&value_field),
+            2,
+            Arc::new(Int32Array::from(vec![0, 1, 10, 11, 20, 21])),
+            None,
+        )) as ArrayRef;
+
+        let taken = take_array_from_batches(
+            &[batch],
+            &[0, 3],
+            &UInt64Array::from(vec![2, 1, 0]),
+        )?;
+        let taken = taken.as_any().downcast_ref::<FixedSizeListArray>().unwrap();
+        let values = taken.values();
+        let values = values.as_any().downcast_ref::<Int32Array>().unwrap();
+
+        assert_eq!(taken.len(), 3);
+        assert_eq!(values.values(), &[20, 21, 10, 11, 0, 1]);
+        Ok(())
+    }
+
+    #[test]
+    fn test_take_array_from_batches_single_batch_nested_fixed_size_list() -> Result<()> {
+        let value_field = Arc::new(Field::new("item", DataType::Int32, false));
+        let inner = Arc::new(FixedSizeListArray::new(
+            Arc::clone(&value_field),
+            2,
+            Arc::new(Int32Array::from(vec![0, 1, 10, 11, 20, 21, 30, 31])),
+            None,
+        ));
+        let outer = Arc::new(FixedSizeListArray::new(
+            Arc::new(Field::new("inner", inner.data_type().clone(), false)),
+            2,
+            inner,
+            None,
+        )) as ArrayRef;
+
+        let taken =
+            take_array_from_batches(&[outer], &[0, 2], &UInt64Array::from(vec![1, 0]))?;
+        let taken = taken.as_any().downcast_ref::<FixedSizeListArray>().unwrap();
+        let inner = taken
+            .values()
+            .as_any()
+            .downcast_ref::<FixedSizeListArray>()
+            .unwrap();
+        let values = inner.values();
+        let values = values.as_any().downcast_ref::<Int32Array>().unwrap();
+
+        assert_eq!(taken.len(), 2);
+        assert_eq!(inner.len(), 4);
+        assert_eq!(values.values(), &[20, 21, 30, 31, 0, 1, 10, 11]);
         Ok(())
     }
 
