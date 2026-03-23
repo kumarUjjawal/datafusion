@@ -28,11 +28,11 @@ use std::sync::Arc;
 use arrow::datatypes::{DataType, Field, Schema};
 use datafusion::assert_batches_eq;
 use datafusion::common::Result;
+use datafusion::execution::object_store::ObjectStoreUrl;
 use datafusion::prelude::{CsvReadOptions, SessionContext};
 use object_store::memory::InMemory;
 use object_store::path::Path;
 use object_store::{ObjectStore, ObjectStoreExt, PutPayload};
-use url::Url;
 
 /// Demonstrates reading CSV data from an in-memory object store.
 ///
@@ -41,9 +41,9 @@ use url::Url;
 pub async fn in_memory_object_store() -> Result<()> {
     let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
     let ctx = SessionContext::new();
-    let object_store_url = Url::parse("mem://")?;
+    let object_store_url = ObjectStoreUrl::parse("memory://")?;
     // Register a URL prefix to route reads through this object store.
-    ctx.register_object_store(&object_store_url, Arc::clone(&store));
+    ctx.register_object_store(object_store_url.as_ref(), Arc::clone(&store));
 
     let schema = Schema::new(vec![
         Field::new("id", DataType::Int64, false),
@@ -59,7 +59,10 @@ pub async fn in_memory_object_store() -> Result<()> {
         .await?;
     // Read using the URL that matches the registered prefix.
     let csv = ctx
-        .read_csv("mem:///people.csv", CsvReadOptions::new().schema(&schema))
+        .read_csv(
+            "memory:///people.csv",
+            CsvReadOptions::new().schema(&schema),
+        )
         .await?
         .collect()
         .await?;
