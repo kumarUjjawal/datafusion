@@ -41,7 +41,7 @@ use url::Url;
 pub async fn in_memory_object_store() -> Result<()> {
     let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
     let ctx = SessionContext::new();
-    let object_store_url = Url::parse("mem://").unwrap();
+    let object_store_url = Url::parse("mem://")?;
     // Register a URL prefix to route reads through this object store.
     ctx.register_object_store(&object_store_url, Arc::clone(&store));
 
