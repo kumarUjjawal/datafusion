@@ -265,7 +265,10 @@ impl Precision<ScalarValue> {
     /// SUM-style addition with integer widening to match SQL `SUM` return
     /// types for smaller integral inputs.
     pub fn add_for_sum(&self, other: &Precision<ScalarValue>) -> Precision<ScalarValue> {
-        precision_add(&self.cast_to_sum_type(), &other.cast_to_sum_type())
+        let mut lhs = self.cast_to_sum_type();
+        let rhs = other.cast_to_sum_type();
+        precision_add(&mut lhs, &rhs);
+        lhs
     }
 
     /// Calculates the difference of two (possibly inexact) [`ScalarValue`] values,
