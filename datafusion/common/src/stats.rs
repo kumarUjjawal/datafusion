@@ -1465,6 +1465,39 @@ mod tests {
         }
     }
 
+    fn make_single_i64_ndv_stats(
+        distinct_count: Precision<usize>,
+        min_value: Option<i64>,
+        max_value: Option<i64>,
+    ) -> Statistics {
+        let to_precision = |value| Precision::Exact(ScalarValue::Int64(Some(value)));
+
+        Statistics::default()
+            .with_num_rows(Precision::Exact(10))
+            .add_column_statistics(
+                ColumnStatistics::new_unknown()
+                    .with_distinct_count(distinct_count)
+                    .with_min_value(
+                        min_value.map(to_precision).unwrap_or(Precision::Absent),
+                    )
+                    .with_max_value(
+                        max_value.map(to_precision).unwrap_or(Precision::Absent),
+                    ),
+            )
+    }
+
+    fn merge_single_i64_ndv_distinct_count(
+        left: Statistics,
+        right: Statistics,
+    ) -> Precision<usize> {
+        let schema = Schema::new(vec![Field::new("a", DataType::Int64, true)]);
+
+        Statistics::try_merge_iter([&left, &right], &schema)
+            .unwrap()
+            .column_statistics[0]
+            .distinct_count
+    }
+
     #[test]
     fn test_try_merge() {
         // Create a schema with two columns
@@ -1908,6 +1941,109 @@ mod tests {
             merged.column_statistics[0].distinct_count,
             Precision::Inexact(2)
         );
+    }
+
+    #[test]
+    fn test_try_merge_ndv_contained_and_constant_range_edge_cases() {
+        type NdvTestCase = (
+            Precision<usize>,
+            Option<i64>,
+            Option<i64>,
+            Precision<usize>,
+            Option<i64>,
+            Option<i64>,
+            Precision<usize>,
+        );
+
+        let cases: Vec<NdvTestCase> = vec![
+            (
+                Precision::Exact(100),
+                Some(0),
+                Some(100),
+                Precision::Exact(50),
+                Some(25),
+                Some(75),
+                Precision::Inexact(100),
+            ),
+            (
+                Precision::Exact(1),
+                Some(5),
+                Some(5),
+                Precision::Exact(10),
+                Some(0),
+                Some(10),
+                Precision::Inexact(10),
+            ),
+            (
+                Precision::Exact(1),
+                Some(20),
+                Some(20),
+                Precision::Exact(10),
+                Some(0),
+                Some(10),
+                Precision::Inexact(11),
+            ),
+            (
+                Precision::Exact(10),
+                Some(0),
+                Some(10),
+                Precision::Exact(1),
+                Some(5),
+                Some(5),
+                Precision::Inexact(10),
+            ),
+            (
+                Precision::Exact(10),
+                Some(0),
+                Some(10),
+                Precision::Exact(1),
+                Some(20),
+                Some(20),
+                Precision::Inexact(11),
+            ),
+        ];
+
+        for (
+            i,
+            (left_ndv, left_min, left_max, right_ndv, right_min, right_max, expected),
+        ) in cases.into_iter().enumerate()
+        {
+            let actual = merge_single_i64_ndv_distinct_count(
+                make_single_i64_ndv_stats(left_ndv, left_min, left_max),
+                make_single_i64_ndv_stats(right_ndv, right_min, right_max),
+            );
+
+            assert_eq!(actual, expected, "case {i} failed");
+        }
+    }
+
+    #[test]
+    fn test_try_merge_ndv_missing_bounds_and_absent_edge_cases() {
+        type NdvTestCase = (Precision<usize>, Precision<usize>, Precision<usize>);
+
+        let cases: Vec<NdvTestCase> = vec![
+            (
+                Precision::Exact(10),
+                Precision::Inexact(5),
+                Precision::Inexact(10),
+            ),
+            (
+                Precision::Inexact(7),
+                Precision::Inexact(3),
+                Precision::Inexact(7),
+            ),
+            (Precision::Exact(10), Precision::Absent, Precision::Absent),
+            (Precision::Inexact(4), Precision::Absent, Precision::Absent),
+        ];
+
+        for (i, (left_ndv, right_ndv, expected)) in cases.into_iter().enumerate() {
+            let actual = merge_single_i64_ndv_distinct_count(
+                make_single_i64_ndv_stats(left_ndv, None, None),
+                make_single_i64_ndv_stats(right_ndv, None, None),
+            );
+
+            assert_eq!(actual, expected, "case {i} failed");
+        }
     }
 
     #[test]
