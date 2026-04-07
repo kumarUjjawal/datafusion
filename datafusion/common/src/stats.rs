@@ -1944,105 +1944,181 @@ mod tests {
     }
 
     #[test]
-    fn test_try_merge_ndv_contained_and_constant_range_edge_cases() {
-        type NdvTestCase = (
-            Precision<usize>,
-            Option<i64>,
-            Option<i64>,
-            Precision<usize>,
-            Option<i64>,
-            Option<i64>,
-            Precision<usize>,
-        );
-
-        let cases: Vec<NdvTestCase> = vec![
-            (
-                Precision::Exact(100),
-                Some(0),
-                Some(100),
-                Precision::Exact(50),
-                Some(25),
-                Some(75),
-                Precision::Inexact(100),
-            ),
-            (
-                Precision::Exact(1),
-                Some(5),
-                Some(5),
-                Precision::Exact(10),
-                Some(0),
-                Some(10),
-                Precision::Inexact(10),
-            ),
-            (
-                Precision::Exact(1),
-                Some(20),
-                Some(20),
-                Precision::Exact(10),
-                Some(0),
-                Some(10),
-                Precision::Inexact(11),
-            ),
-            (
-                Precision::Exact(10),
-                Some(0),
-                Some(10),
-                Precision::Exact(1),
-                Some(5),
-                Some(5),
-                Precision::Inexact(10),
-            ),
-            (
-                Precision::Exact(10),
-                Some(0),
-                Some(10),
-                Precision::Exact(1),
-                Some(20),
-                Some(20),
-                Precision::Inexact(11),
-            ),
-        ];
-
-        for (
-            i,
-            (left_ndv, left_min, left_max, right_ndv, right_min, right_max, expected),
-        ) in cases.into_iter().enumerate()
-        {
-            let actual = merge_single_i64_ndv_distinct_count(
-                make_single_i64_ndv_stats(left_ndv, left_min, left_max),
-                make_single_i64_ndv_stats(right_ndv, right_min, right_max),
-            );
-
-            assert_eq!(actual, expected, "case {i} failed");
+    fn test_try_merge_ndv_original_union_edge_cases() {
+        struct NdvTestCase {
+            name: &'static str,
+            left_ndv: Precision<usize>,
+            left_min: Option<i64>,
+            left_max: Option<i64>,
+            right_ndv: Precision<usize>,
+            right_min: Option<i64>,
+            right_max: Option<i64>,
+            expected: Precision<usize>,
         }
-    }
 
-    #[test]
-    fn test_try_merge_ndv_missing_bounds_and_absent_edge_cases() {
-        type NdvTestCase = (Precision<usize>, Precision<usize>, Precision<usize>);
-
-        let cases: Vec<NdvTestCase> = vec![
-            (
-                Precision::Exact(10),
-                Precision::Inexact(5),
-                Precision::Inexact(10),
-            ),
-            (
-                Precision::Inexact(7),
-                Precision::Inexact(3),
-                Precision::Inexact(7),
-            ),
-            (Precision::Exact(10), Precision::Absent, Precision::Absent),
-            (Precision::Inexact(4), Precision::Absent, Precision::Absent),
+        let cases = vec![
+            NdvTestCase {
+                name: "disjoint ranges",
+                left_ndv: Precision::Exact(5),
+                left_min: Some(0),
+                left_max: Some(10),
+                right_ndv: Precision::Exact(3),
+                right_min: Some(20),
+                right_max: Some(30),
+                expected: Precision::Inexact(8),
+            },
+            NdvTestCase {
+                name: "identical ranges",
+                left_ndv: Precision::Exact(10),
+                left_min: Some(0),
+                left_max: Some(100),
+                right_ndv: Precision::Exact(8),
+                right_min: Some(0),
+                right_max: Some(100),
+                expected: Precision::Inexact(10),
+            },
+            NdvTestCase {
+                name: "partial overlap",
+                left_ndv: Precision::Exact(100),
+                left_min: Some(0),
+                left_max: Some(100),
+                right_ndv: Precision::Exact(50),
+                right_min: Some(50),
+                right_max: Some(150),
+                expected: Precision::Inexact(125),
+            },
+            NdvTestCase {
+                name: "right contained in left",
+                left_ndv: Precision::Exact(100),
+                left_min: Some(0),
+                left_max: Some(100),
+                right_ndv: Precision::Exact(50),
+                right_min: Some(25),
+                right_max: Some(75),
+                expected: Precision::Inexact(100),
+            },
+            NdvTestCase {
+                name: "same constant value",
+                left_ndv: Precision::Exact(1),
+                left_min: Some(5),
+                left_max: Some(5),
+                right_ndv: Precision::Exact(1),
+                right_min: Some(5),
+                right_max: Some(5),
+                expected: Precision::Inexact(1),
+            },
+            NdvTestCase {
+                name: "different constant values",
+                left_ndv: Precision::Exact(1),
+                left_min: Some(5),
+                left_max: Some(5),
+                right_ndv: Precision::Exact(1),
+                right_min: Some(10),
+                right_max: Some(10),
+                expected: Precision::Inexact(2),
+            },
+            NdvTestCase {
+                name: "left constant within right range",
+                left_ndv: Precision::Exact(1),
+                left_min: Some(5),
+                left_max: Some(5),
+                right_ndv: Precision::Exact(10),
+                right_min: Some(0),
+                right_max: Some(10),
+                expected: Precision::Inexact(10),
+            },
+            NdvTestCase {
+                name: "left constant outside right range",
+                left_ndv: Precision::Exact(1),
+                left_min: Some(20),
+                left_max: Some(20),
+                right_ndv: Precision::Exact(10),
+                right_min: Some(0),
+                right_max: Some(10),
+                expected: Precision::Inexact(11),
+            },
+            NdvTestCase {
+                name: "right constant within left range",
+                left_ndv: Precision::Exact(10),
+                left_min: Some(0),
+                left_max: Some(10),
+                right_ndv: Precision::Exact(1),
+                right_min: Some(5),
+                right_max: Some(5),
+                expected: Precision::Inexact(10),
+            },
+            NdvTestCase {
+                name: "right constant outside left range",
+                left_ndv: Precision::Exact(10),
+                left_min: Some(0),
+                left_max: Some(10),
+                right_ndv: Precision::Exact(1),
+                right_min: Some(20),
+                right_max: Some(20),
+                expected: Precision::Inexact(11),
+            },
+            NdvTestCase {
+                name: "missing bounds exact plus exact",
+                left_ndv: Precision::Exact(10),
+                left_min: None,
+                left_max: None,
+                right_ndv: Precision::Exact(5),
+                right_min: None,
+                right_max: None,
+                // Shared merge falls back to max without bounds.
+                expected: Precision::Inexact(10),
+            },
+            NdvTestCase {
+                name: "missing bounds exact plus inexact",
+                left_ndv: Precision::Exact(10),
+                left_min: None,
+                left_max: None,
+                right_ndv: Precision::Inexact(5),
+                right_min: None,
+                right_max: None,
+                // Shared merge falls back to max without bounds.
+                expected: Precision::Inexact(10),
+            },
+            NdvTestCase {
+                name: "missing bounds inexact plus inexact",
+                left_ndv: Precision::Inexact(7),
+                left_min: None,
+                left_max: None,
+                right_ndv: Precision::Inexact(3),
+                right_min: None,
+                right_max: None,
+                // Shared merge falls back to max without bounds.
+                expected: Precision::Inexact(7),
+            },
+            NdvTestCase {
+                name: "exact plus absent",
+                left_ndv: Precision::Exact(10),
+                left_min: None,
+                left_max: None,
+                right_ndv: Precision::Absent,
+                right_min: None,
+                right_max: None,
+                expected: Precision::Absent,
+            },
+            NdvTestCase {
+                name: "inexact plus absent",
+                left_ndv: Precision::Inexact(4),
+                left_min: None,
+                left_max: None,
+                right_ndv: Precision::Absent,
+                right_min: None,
+                right_max: None,
+                expected: Precision::Absent,
+            },
         ];
 
-        for (i, (left_ndv, right_ndv, expected)) in cases.into_iter().enumerate() {
+        for case in cases {
             let actual = merge_single_i64_ndv_distinct_count(
-                make_single_i64_ndv_stats(left_ndv, None, None),
-                make_single_i64_ndv_stats(right_ndv, None, None),
+                make_single_i64_ndv_stats(case.left_ndv, case.left_min, case.left_max),
+                make_single_i64_ndv_stats(case.right_ndv, case.right_min, case.right_max),
             );
 
-            assert_eq!(actual, expected, "case {i} failed");
+            assert_eq!(actual, case.expected, "case {} failed", case.name);
         }
     }
 
