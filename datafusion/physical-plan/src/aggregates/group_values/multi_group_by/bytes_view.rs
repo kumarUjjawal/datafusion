@@ -195,11 +195,10 @@ impl<B: ByteViewType> ByteViewGroupValueBuilder<B> {
         }
 
         let start_idx = self.views.len();
-        self.views.extend(rows.iter().map(|&row| source_views[row]));
-
-        let mut pending = Vec::with_capacity(rows.len());
+        let mut pending = Vec::with_capacity(rows.len().saturating_add(1) / 2);
         for (idx, &row) in rows.iter().enumerate() {
             let view = source_views[row];
+            self.views.push(view);
             if (view as u32) > 12 {
                 pending.push(PendingByteViewCopy {
                     dest_index: start_idx + idx,
@@ -217,7 +216,7 @@ impl<B: ByteViewType> ByteViewGroupValueBuilder<B> {
         rows: &[usize],
     ) {
         let source_views = array.views();
-        let mut pending = Vec::with_capacity(rows.len());
+        let mut pending = Vec::with_capacity(rows.len().saturating_add(1) / 2);
         self.views.reserve(rows.len());
 
         for &row in rows {
