@@ -33,7 +33,7 @@ pub const TPCH_TABLES: &[&str] = &[
 
 pub const TPCH_QUERY_START_ID: usize = 1;
 pub const TPCH_QUERY_END_ID: usize = 22;
-const TPCH_Q11_SCALE_FACTOR_PLACEHOLDER: &str = "__TPCH_SCALE_FACTOR__";
+const TPCH_Q11_FRACTION_SENTINEL: &str = "0.0001 /* __TPCH_Q11_FRACTION__ */";
 
 /// The `.tbl` file contains a trailing column
 pub fn get_tbl_tpch_table_schema(table: &str) -> Schema {
@@ -190,13 +190,16 @@ fn customize_query_sql(
         return Ok(contents);
     }
 
-    if !contents.contains(TPCH_Q11_SCALE_FACTOR_PLACEHOLDER) {
+    if !contents.contains(TPCH_Q11_FRACTION_SENTINEL) {
         return plan_err!(
-            "invalid query 11. Missing scale factor placeholder {TPCH_Q11_SCALE_FACTOR_PLACEHOLDER}"
+            "invalid query 11. Missing fraction marker {TPCH_Q11_FRACTION_SENTINEL}"
         );
     }
 
-    Ok(contents.replace(TPCH_Q11_SCALE_FACTOR_PLACEHOLDER, &scale_factor.to_string()))
+    Ok(contents.replace(
+        TPCH_Q11_FRACTION_SENTINEL,
+        &format!("(0.0001 / {scale_factor})"),
+    ))
 }
 
 pub const QUERY_LIMIT: [Option<usize>; 22] = [
@@ -257,7 +260,7 @@ mod tests {
 
         let sf30_sql = get_single_query_for_scale_factor(11, 30.0)?;
         assert!(sf30_sql.contains("(0.0001 / 30)"));
-        assert!(!sf10_sql.contains("__TPCH_SCALE_FACTOR__"));
+        assert!(!sf10_sql.contains("__TPCH_Q11_FRACTION__"));
         Ok(())
     }
 
