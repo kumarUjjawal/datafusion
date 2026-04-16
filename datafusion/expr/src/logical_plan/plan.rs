@@ -2496,6 +2496,19 @@ impl Filter {
         Self::try_new_internal(predicate, input)
     }
 
+    /// Create a new filter operator without re-validating the predicate type.
+    ///
+    /// This is intended for internal optimizer use when rearranging predicates
+    /// that are already known to be valid filter expressions. Like
+    /// [`Self::try_new`], this removes nested aliases from the predicate.
+    #[doc(hidden)]
+    pub fn new_unchecked(predicate: Expr, input: Arc<LogicalPlan>) -> Self {
+        Self {
+            predicate: predicate.unalias_nested().data,
+            input,
+        }
+    }
+
     fn is_allowed_filter_type(data_type: &DataType) -> bool {
         match data_type {
             // Interpret NULL as a missing boolean value.
@@ -2520,10 +2533,7 @@ impl Filter {
             );
         }
 
-        Ok(Self {
-            predicate: predicate.unalias_nested().data,
-            input,
-        })
+        Ok(Self::new_unchecked(predicate, input))
     }
 
     /// Is this filter guaranteed to return 0 or 1 row in a given instantiation?
@@ -5161,6 +5171,43 @@ mod tests {
         let filter =
             Filter::try_new(Expr::Column(col.into()).eq(lit(1i32)), scan).unwrap();
         assert!(filter.is_scalar());
+    }
+
+    #[test]
+    fn test_filter_new_unchecked_strips_aliases() {
+        let scan = Arc::new(
+            table_scan(Some("employee_csv"), &employee_schema(), Some(vec![0]))
+                .unwrap()
+                .build()
+                .unwrap(),
+        );
+
+        let predicate = col("id").alias("employee_id").eq(lit(1i32)).alias("pred");
+        let unchecked = Filter::new_unchecked(predicate, scan);
+
+        assert_eq!(unchecked.predicate, col("id").eq(lit(1i32)));
+    }
+
+    #[test]
+    fn test_filter_new_unchecked_skips_type_validation() {
+        let scan = Arc::new(
+            table_scan(Some("employee_csv"), &employee_schema(), Some(vec![0]))
+                .unwrap()
+                .build()
+                .unwrap(),
+        );
+
+        let predicate = col("id") + lit(1i32);
+
+        let err = Filter::try_new(predicate.clone(), Arc::clone(&scan)).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("Cannot create filter with non-boolean predicate"),
+            "{err}"
+        );
+
+        let unchecked = Filter::new_unchecked(predicate.clone(), scan);
+        assert_eq!(unchecked.predicate, predicate);
     }
 
     #[test]
