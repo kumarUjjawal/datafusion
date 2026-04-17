@@ -249,3 +249,31 @@ SELECT id FROM test_data WHERE ceil(float_val) < arrow_cast(7, 'Float64');
 1
 2
 3
+
+##########
+## Negative-Scale Decimal Regression
+##########
+
+statement ok
+set datafusion.sql_parser.parse_float_as_decimal = true;
+
+# Negative-scale decimals are already integral, so ceil(v) = 1e2 should match 100.
+query R rowsort
+SELECT v FROM (VALUES (1e2), (2e2)) AS t(v) WHERE ceil(v) = 1e2;
+----
+100
+
+# Negative-scale decimals should also work for negative values.
+query R rowsort
+SELECT v FROM (VALUES (-2e2), (-1e2), (1e2)) AS t(v) WHERE ceil(v) = -1e2;
+----
+-100
+
+# Regression for the upper bound crossing the coefficient precision (9e2 -> 10e2 bound).
+query R rowsort
+SELECT v FROM (VALUES (1e2), (9e2)) AS t(v) WHERE ceil(v) = 9e2;
+----
+900
+
+statement ok
+set datafusion.sql_parser.parse_float_as_decimal = false;

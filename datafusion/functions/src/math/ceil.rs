@@ -351,6 +351,8 @@ fn int_preimage_bounds<I: CheckedAdd + One + Copy>(n: I) -> Option<(I, I)> {
 /// Compute preimage bounds for ceil function on decimal types.
 /// For ceil(x) = n, the preimage is (n-1, n] which maps to
 /// [n-1 + step, n + step) where step is the decimal unit at the target scale.
+/// For decimals with scale <= 0, values are already integral, so ceil acts as
+/// identity and the preimage is [n, next_representable(n)).
 /// Returns None if:
 /// - The value has a fractional part (ceil always returns integers)
 /// - Adding or subtracting would overflow
@@ -362,21 +364,23 @@ fn decimal_preimage_bounds<D: DecimalType>(
 where
     D::Native: DecimalCast + ArrowNativeTypeOp + std::ops::Rem<Output = D::Native>,
 {
+    let upper = value.add_checked(D::Native::ONE).ok()?;
+
+    // Decimals with non-positive scale are already integral, so `ceil` is the
+    // identity function and the preimage is a singleton interval.
+    if scale <= 0 {
+        return Some((value, upper));
+    }
+
     let one_scaled: D::Native =
         rescale_decimal::<D, D>(D::Native::ONE, 1, 0, precision, scale)?;
 
-    if scale > 0 && value % one_scaled != D::Native::ZERO {
+    if value % one_scaled != D::Native::ZERO {
         return None;
     }
 
-    let lower = if scale == 0 {
-        value
-    } else {
-        let lower_base = value.sub_checked(one_scaled).ok()?;
-        lower_base.add_checked(D::Native::ONE).ok()?
-    };
-
-    let upper = value.add_checked(D::Native::ONE).ok()?;
+    let lower_base = value.sub_checked(one_scaled).ok()?;
+    let lower = lower_base.add_checked(D::Native::ONE).ok()?;
 
     Some((lower, upper))
 }
@@ -559,6 +563,12 @@ mod tests {
             ScalarValue::Decimal32(Some(42), 9, 0), // 42
             ScalarValue::Decimal32(Some(43), 9, 0), // 43
         );
+        // Negative-scale decimals are already integral: 1 * 10^2 = 100
+        assert_preimage_range(
+            ScalarValue::Decimal32(Some(1), 9, -2), // 100
+            ScalarValue::Decimal32(Some(1), 9, -2), // 100
+            ScalarValue::Decimal32(Some(2), 9, -2), // 200
+        );
 
         // Decimal64 tests: same logic with wider precision
         assert_preimage_range(
@@ -582,6 +592,11 @@ mod tests {
             ScalarValue::Decimal128(Some(-500), 38, 2), // -5.00
             ScalarValue::Decimal128(Some(-599), 38, 2), // -5.99
             ScalarValue::Decimal128(Some(-499), 38, 2), // -4.99
+        );
+        assert_preimage_range(
+            ScalarValue::Decimal128(Some(1), 38, -2), // 100
+            ScalarValue::Decimal128(Some(1), 38, -2), // 100
+            ScalarValue::Decimal128(Some(2), 38, -2), // 200
         );
 
         // Decimal256 tests: same logic with widest precision
