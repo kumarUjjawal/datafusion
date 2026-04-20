@@ -28,8 +28,15 @@ use std::marker::PhantomData;
 use std::mem::{replace, size_of};
 use std::sync::Arc;
 
+/// Matches Arrow's byte view layout: values up to 12 bytes are stored inline.
+const MAX_INLINE_VIEW_LEN: u32 = 12;
 const BYTE_VIEW_MAX_BLOCK_SIZE: usize = 2 * 1024 * 1024;
 
+/// Records long views that still need their `buffer_index` and `offset` rewritten
+/// after their bytes are copied into this builder.
+///
+/// Keeping these in a temporary list lets `vectorized_append` detect adjacent
+/// slices from the same source buffer and copy them in one batch.
 #[derive(Clone, Copy)]
 struct PendingByteViewCopy {
     dest_index: usize,
@@ -196,16 +203,17 @@ impl<B: ByteViewType> ByteViewGroupValueBuilder<B> {
 
         let start_idx = self.views.len();
         let mut pending = Vec::with_capacity(rows.len().saturating_add(1) / 2);
-        for (idx, &row) in rows.iter().enumerate() {
-            let view = source_views[row];
-            self.views.push(view);
-            if (view as u32) > 12 {
-                pending.push(PendingByteViewCopy {
-                    dest_index: start_idx + idx,
-                    source: ByteView::from(view),
-                });
-            }
-        }
+        self.views
+            .extend(rows.iter().enumerate().map(|(idx, &row)| {
+                let view = source_views[row];
+                if (view as u32) > MAX_INLINE_VIEW_LEN {
+                    pending.push(PendingByteViewCopy {
+                        dest_index: start_idx + idx,
+                        source: ByteView::from(view),
+                    });
+                }
+                view
+            }));
 
         self.batch_copy_long_views(array.data_buffers(), &pending);
     }
@@ -227,22 +235,21 @@ impl<B: ByteViewType> ByteViewGroupValueBuilder<B> {
             }
 
             self.nulls.append(false);
-
             let view = source_views[row];
-            let dest_index = self.views.len();
-            self.views.push(view);
-
-            if (view as u32) > 12 {
+            if (view as u32) > MAX_INLINE_VIEW_LEN {
                 pending.push(PendingByteViewCopy {
-                    dest_index,
+                    dest_index: self.views.len(),
                     source: ByteView::from(view),
                 });
             }
+            self.views.push(view);
         }
 
         self.batch_copy_long_views(array.data_buffers(), &pending);
     }
 
+    /// Copy long values after collecting their source views so adjacent ranges
+    /// from the same source buffer can be merged into a single copy.
     fn batch_copy_long_views(
         &mut self,
         source_buffers: &[Buffer],
@@ -315,7 +322,7 @@ impl<B: ByteViewType> ByteViewGroupValueBuilder<B> {
         let value: &[u8] = array.value(row).as_ref();
 
         let value_len = value.len();
-        let view = if value_len <= 12 {
+        let view = if value_len <= MAX_INLINE_VIEW_LEN as usize {
             make_view(value, 0, 0)
         } else {
             // Ensure big enough block to hold the value firstly
@@ -334,7 +341,7 @@ impl<B: ByteViewType> ByteViewGroupValueBuilder<B> {
     }
 
     fn ensure_in_progress_big_enough(&mut self, value_len: usize) {
-        debug_assert!(value_len > 12);
+        debug_assert!(value_len > MAX_INLINE_VIEW_LEN as usize);
         let require_cap = self.in_progress.len() + value_len;
 
         // If current block isn't big enough, flush it and create a new in progress block
@@ -393,7 +400,7 @@ impl<B: ByteViewType> ByteViewGroupValueBuilder<B> {
             return false;
         }
 
-        if exist_view_len <= 12 {
+        if exist_view_len <= MAX_INLINE_VIEW_LEN {
             // both inlined, so compare inlined value
             exist_view == input_view
         } else {
@@ -498,7 +505,7 @@ impl<B: ByteViewType> ByteViewGroupValueBuilder<B> {
         let last_non_inlined_view = first_n_views
             .iter()
             .rev()
-            .find(|view| ((**view) as u32) > 12);
+            .find(|view| ((**view) as u32) > MAX_INLINE_VIEW_LEN);
 
         // All taken views inlined
         let Some(view) = last_non_inlined_view else {
@@ -545,7 +552,7 @@ impl<B: ByteViewType> ByteViewGroupValueBuilder<B> {
         };
 
         self.views.iter_mut().for_each(|view| {
-            if (*view as u32) > 12 {
+            if (*view as u32) > MAX_INLINE_VIEW_LEN {
                 let mut byte_view = ByteView::from(*view);
                 byte_view.buffer_index -= shifts as u32;
                 *view = byte_view.as_u128();
