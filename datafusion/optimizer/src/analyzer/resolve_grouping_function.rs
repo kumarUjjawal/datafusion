@@ -111,7 +111,7 @@ fn replace_grouping_exprs(
                     &group_expr_to_bitmap_index,
                     grouping_id_type,
                 )?;
-                projection_exprs.push(Expr::Alias(Alias::new(
+                projection_exprs.push(Expr::Alias(Alias::new_internal(
                     grouping_expr,
                     column.relation,
                     column.name,

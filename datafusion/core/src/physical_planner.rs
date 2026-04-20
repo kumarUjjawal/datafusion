@@ -2383,10 +2383,10 @@ pub fn create_window_expr(
 ) -> Result<Arc<dyn WindowExpr>> {
     // unpack aliased logical expressions, e.g. "sum(col) over () as total"
     let (name, e) = match e {
-        Expr::Alias(Alias { expr, name, .. }) => (name.clone(), expr.as_ref()),
-        _ => (e.schema_name().to_string(), e),
+        Expr::Alias(alias) => (alias.name.clone(), e.clone().unalias_nested().data),
+        _ => (e.schema_name().to_string(), e.clone()),
     };
-    create_window_expr_with_name(e, name, logical_schema, execution_props)
+    create_window_expr_with_name(&e, name, logical_schema, execution_props)
 }
 
 type AggregateExprWithOptionalArgs = (
@@ -2476,15 +2476,21 @@ pub fn create_aggregate_expr_and_maybe_filter(
     // Some functions like `count_all()` create internal aliases,
     // Unwrap all alias layers to get to the underlying aggregate function
     let (name, human_display, e) = match e {
-        Expr::Alias(Alias { name, .. }) => {
+        Expr::Alias(alias) => {
             let unaliased = e.clone().unalias_nested().data;
-            let human_display = unaliased.human_display().to_string();
-            let human_display = if human_display.is_empty() || human_display == *name {
-                name.clone()
+            let human_display = if should_inline_aliased_aggregate_expr(alias) {
+                let human_display =
+                    inherited_internal_aggregate_display(alias.expr.as_ref())
+                        .unwrap_or_else(|| unaliased.human_display().to_string());
+                if human_display.is_empty() || human_display == alias.name {
+                    alias.name.clone()
+                } else {
+                    format!("{human_display} as {}", alias.name)
+                }
             } else {
-                format!("{human_display} as {name}")
+                alias.name.clone()
             };
-            (Some(name.clone()), human_display, unaliased)
+            (Some(alias.name.clone()), human_display, unaliased)
         }
         Expr::AggregateFunction(_) => (
             Some(e.schema_name().to_string()),
@@ -2502,6 +2508,25 @@ pub fn create_aggregate_expr_and_maybe_filter(
         physical_input_schema,
         execution_props,
     )
+}
+
+fn should_inline_aliased_aggregate_expr(alias: &Alias) -> bool {
+    !alias.is_internal
+}
+
+fn inherited_internal_aggregate_display(expr: &Expr) -> Option<String> {
+    let mut expr = expr;
+    while let Expr::Alias(alias) = expr {
+        let has_user_metadata = alias
+            .metadata
+            .as_ref()
+            .is_some_and(|metadata| !metadata.is_empty());
+        if alias.is_internal && !has_user_metadata {
+            return Some(alias.name.clone());
+        }
+        expr = alias.expr.as_ref();
+    }
+    None
 }
 
 impl DefaultPhysicalPlanner {
@@ -3171,6 +3196,49 @@ mod tests {
     async fn aggregate_explain(logical_plan: &LogicalPlan) -> Result<String> {
         let physical_plan = plan(logical_plan).await?;
         Ok(displayable(physical_plan.as_ref()).indent(true).to_string())
+    }
+
+    #[test]
+    fn test_should_inline_aliased_aggregate_expr() {
+        let Expr::Alias(user_alias) = sum(col("column1")).alias("total rows") else {
+            panic!("expected alias");
+        };
+        assert!(should_inline_aliased_aggregate_expr(&user_alias));
+
+        let Expr::Alias(count_all_alias) = count_all() else {
+            panic!("expected alias");
+        };
+        assert!(!should_inline_aliased_aggregate_expr(&count_all_alias));
+
+        let Expr::Alias(internal_alias) =
+            sum(col("column1")).alias_internal("sum(random() + Int64(1))")
+        else {
+            panic!("expected alias");
+        };
+        assert!(!should_inline_aliased_aggregate_expr(&internal_alias));
+    }
+
+    #[test]
+    fn test_inherited_internal_aggregate_display() {
+        let expr = count_all().alias_internal("row_count").alias("total_rows");
+        let Expr::Alias(alias) = expr else {
+            panic!("expected alias");
+        };
+        assert_eq!(
+            inherited_internal_aggregate_display(alias.expr.as_ref()),
+            Some("row_count".to_string())
+        );
+
+        let expr = count_all()
+            .alias_internal("inner_count")
+            .alias_internal("outer_count");
+        assert_eq!(
+            inherited_internal_aggregate_display(&expr),
+            Some("outer_count".to_string())
+        );
+
+        let expr = sum(col("column1")).alias("total_rows");
+        assert_eq!(inherited_internal_aggregate_display(&expr), None);
     }
 
     #[derive(Debug, Default)]
@@ -3878,6 +3946,56 @@ mod tests {
         assert_contains!(
             aggregate_explain(&logical_plan).await?,
             "AggregateExec: mode=Single, gby=[], aggr=[sum(?table?.column1) FILTER (WHERE ?table?.column2 <= Int64(0)) as agg]"
+        );
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_aggregate_explain_shows_quoted_user_alias() -> Result<()> {
+        let schema = Arc::new(Schema::new(vec![Field::new(
+            "column1",
+            DataType::Int64,
+            false,
+        )]));
+
+        let logical_plan = scan_empty(None, schema.as_ref(), None)?
+            .aggregate(
+                Vec::<Expr>::new(),
+                vec![sum(col("column1")).alias("total rows")],
+            )?
+            .build()?;
+
+        assert_contains!(
+            aggregate_explain(&logical_plan).await?,
+            "AggregateExec: mode=Single, gby=[], aggr=[sum(?table?.column1) as total rows]"
+        );
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_aggregate_explain_shows_count_all() -> Result<()> {
+        let logical_plan = test_csv_scan()
+            .await?
+            .aggregate(Vec::<Expr>::new(), vec![count_all()])?
+            .build()?;
+
+        assert_contains!(aggregate_explain(&logical_plan).await?, "aggr=[count(*)]");
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_aggregate_explain_shows_count_all_with_user_alias() -> Result<()> {
+        let logical_plan = test_csv_scan()
+            .await?
+            .aggregate(Vec::<Expr>::new(), vec![count_all().alias("total_rows")])?
+            .build()?;
+
+        assert_contains!(
+            aggregate_explain(&logical_plan).await?,
+            "aggr=[count(*) as total_rows]"
         );
 
         Ok(())

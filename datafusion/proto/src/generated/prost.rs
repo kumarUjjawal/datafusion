@@ -776,6 +776,8 @@ pub struct AliasNode {
         ::prost::alloc::string::String,
         ::prost::alloc::string::String,
     >,
+    #[prost(bool, tag = "5")]
+    pub is_internal: bool,
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct BinaryExprNode {

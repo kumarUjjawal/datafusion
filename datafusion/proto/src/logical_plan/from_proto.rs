@@ -365,15 +365,25 @@ pub fn parse_expr(
 
             builder.build().map_err(Error::DataFusionError)
         }
-        ExprType::Alias(alias) => Ok(Expr::Alias(Alias::new(
-            parse_required_expr(alias.expr.as_deref(), registry, "expr", codec)?,
-            alias
-                .relation
-                .first()
-                .map(|r| TableReference::try_from(r.clone()))
-                .transpose()?,
-            alias.alias.clone(),
-        ))),
+        ExprType::Alias(alias) => {
+            let metadata =
+                (!alias.metadata.is_empty()).then(|| alias.metadata.clone().into());
+            let is_internal = alias.is_internal;
+            let expr_alias = Alias::new(
+                parse_required_expr(alias.expr.as_deref(), registry, "expr", codec)?,
+                alias
+                    .relation
+                    .first()
+                    .map(|r| TableReference::try_from(r.clone()))
+                    .transpose()?,
+                alias.alias.clone(),
+            )
+            .with_metadata(metadata);
+            Ok(Expr::Alias(Alias {
+                is_internal,
+                ..expr_alias
+            }))
+        }
         ExprType::IsNullExpr(is_null) => Ok(Expr::IsNull(Box::new(parse_required_expr(
             is_null.expr.as_deref(),
             registry,

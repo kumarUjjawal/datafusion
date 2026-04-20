@@ -440,6 +440,7 @@ pub(super) fn inject_column_aliases(
                 relation,
                 name: col_alias.value,
                 metadata: None,
+                is_internal: false,
             })
         })
         .collect::<Vec<_>>();

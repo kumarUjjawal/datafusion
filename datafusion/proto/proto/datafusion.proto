@@ -513,6 +513,7 @@ message AliasNode {
   string alias = 2;
   repeated TableReference relation = 3;
   map<string, string> metadata = 4;
+  bool is_internal = 5;
 }
 
 message BinaryExprNode {

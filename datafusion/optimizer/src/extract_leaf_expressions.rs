@@ -614,7 +614,8 @@ fn build_extraction_projection_impl(
 
         // Add new extracted expressions, resolving column refs through the projection
         for (expr, alias) in extracted_exprs {
-            let resolved = replace_cols_by_name(expr.clone().alias(alias), &replace_map)?;
+            let resolved =
+                replace_cols_by_name(expr.clone().alias_internal(alias), &replace_map)?;
             let resolved_inner = if let Expr::Alias(a) = &resolved {
                 a.expr.as_ref()
             } else {
@@ -669,7 +670,7 @@ fn build_extraction_projection_impl(
         // Build new projection with extracted expressions + all input columns
         let mut proj_exprs = Vec::new();
         for (expr, alias) in extracted_exprs {
-            proj_exprs.push(expr.clone().alias(alias));
+            proj_exprs.push(expr.clone().alias_internal(alias));
         }
         for (qualifier, field) in target_schema.iter() {
             proj_exprs.push(Expr::from((qualifier, field)));

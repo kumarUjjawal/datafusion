@@ -30,7 +30,7 @@ use datafusion_common::alias::AliasGenerator;
 use datafusion_common::cse::{CSE, CSEController, FoundCommonNodes};
 use datafusion_common::tree_node::{Transformed, TreeNode};
 use datafusion_common::{Column, DFSchema, DFSchemaRef, Result, qualified_name};
-use datafusion_expr::expr::{Alias, ScalarFunction};
+use datafusion_expr::expr::ScalarFunction;
 use datafusion_expr::logical_plan::{
     Aggregate, Filter, LogicalPlan, Projection, Sort, Window,
 };
@@ -330,7 +330,7 @@ impl CommonSubexprEliminate {
 
                         let mut agg_exprs = common_exprs
                             .into_iter()
-                            .map(|(expr, expr_alias)| expr.alias(expr_alias))
+                            .map(|(expr, expr_alias)| expr.alias_internal(expr_alias))
                             .collect::<Vec<_>>();
 
                         let mut proj_exprs = vec![];
@@ -350,10 +350,9 @@ impl CommonSubexprEliminate {
                                 } else {
                                     expr_rewritten
                                 };
-                                if let Expr::Alias(Alias { expr, name, .. }) =
-                                    expr_rewritten
-                                {
-                                    agg_exprs.push(expr.alias(&name));
+                                if let Expr::Alias(alias) = expr_rewritten {
+                                    let name = alias.name.clone();
+                                    agg_exprs.push(Expr::Alias(alias));
                                     proj_exprs
                                         .push(Expr::Column(Column::from_name(name)));
                                 } else {
@@ -364,10 +363,11 @@ impl CommonSubexprEliminate {
                                     let out_name =
                                         qualified_name(qualifier.as_ref(), &field_name);
 
-                                    agg_exprs.push(expr_rewritten.alias(&expr_alias));
+                                    agg_exprs
+                                        .push(expr_rewritten.alias_internal(&expr_alias));
                                     proj_exprs.push(
                                         Expr::Column(Column::from_name(expr_alias))
-                                            .alias(out_name),
+                                            .alias_internal(out_name),
                                     );
                                 }
                             } else {
@@ -742,7 +742,7 @@ impl CSEController for ExprCSEController<'_> {
             col(alias)
         } else {
             self.alias_counter += 1;
-            col(alias).alias(node.schema_name().to_string())
+            col(alias).alias_internal(node.schema_name().to_string())
         }
     }
 
@@ -783,7 +783,7 @@ fn build_common_expr_project_plan(
         .into_iter()
         .map(|(expr, expr_alias)| {
             fields_set.insert(expr_alias.clone());
-            Ok(expr.alias(expr_alias))
+            Ok(expr.alias_internal(expr_alias))
         })
         .collect::<Result<Vec<_>>>()?;
 

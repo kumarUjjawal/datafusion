@@ -260,7 +260,13 @@ fn rewrite_internal(join: Join) -> Result<Transformed<LogicalPlan>> {
                     )],
                     else_expr: Some(Box::new(col)),
                 });
-                proj_exprs.push(case_expr.alias_qualified(qualifier.cloned(), name));
+                proj_exprs.push(Expr::Alias(expr::Alias {
+                    expr: Box::new(case_expr),
+                    relation: qualifier.cloned(),
+                    name: name.to_string(),
+                    metadata: None,
+                    is_internal: false,
+                }));
                 continue;
             }
             proj_exprs.push(col);

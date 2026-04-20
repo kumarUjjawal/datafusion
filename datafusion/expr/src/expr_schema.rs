@@ -454,14 +454,10 @@ impl ExprSchemable for Expr {
         let (relation, schema_name) = self.qualified_name();
         #[expect(deprecated)]
         let field = match self {
-            Expr::Alias(Alias {
-                expr,
-                name: _,
-                metadata,
-                ..
-            }) => {
+            Expr::Alias(alias) => {
+                let expr = &alias.expr;
                 let mut combined_metadata = expr.metadata(schema)?;
-                if let Some(metadata) = metadata {
+                if let Some(metadata) = &alias.metadata {
                     combined_metadata.extend(metadata.clone());
                 }
 
@@ -1004,6 +1000,27 @@ mod tests {
             Column::from_name("foo"),
         );
         assert_eq!(meta, outer_ref.metadata(&schema).unwrap());
+    }
+
+    #[test]
+    fn test_internal_alias_metadata_is_preserved_in_field_metadata() {
+        let schema = MockExprSchema::new().with_data_type(DataType::Int32);
+        let alias_metadata = FieldMetadata::from(HashMap::from([(
+            "some_key".to_string(),
+            "some_value".to_string(),
+        )]));
+
+        let Expr::Alias(alias) = col("foo").alias_internal("alias") else {
+            unreachable!();
+        };
+        let expr = Expr::Alias(alias.with_metadata(Some(alias_metadata.clone())));
+
+        let field = expr.to_field(&schema).unwrap().1;
+        assert_eq!(
+            field.metadata().get("some_key"),
+            Some(&"some_value".to_string())
+        );
+        assert_eq!(expr.metadata(&schema).unwrap(), alias_metadata);
     }
 
     #[test]

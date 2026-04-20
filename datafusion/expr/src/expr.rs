@@ -561,6 +561,7 @@ pub struct Alias {
     pub relation: Option<TableReference>,
     pub name: String,
     pub metadata: Option<FieldMetadata>,
+    pub is_internal: bool,
 }
 
 impl Hash for Alias {
@@ -568,6 +569,8 @@ impl Hash for Alias {
         self.expr.hash(state);
         self.relation.hash(state);
         self.name.hash(state);
+        self.metadata.hash(state);
+        self.is_internal.hash(state);
     }
 }
 
@@ -600,12 +603,52 @@ impl Alias {
             relation: relation.map(|r| r.into()),
             name: name.into(),
             metadata: None,
+            is_internal: false,
+        }
+    }
+
+    #[doc(hidden)]
+    pub fn new_internal(
+        expr: Expr,
+        relation: Option<impl Into<TableReference>>,
+        name: impl Into<String>,
+    ) -> Self {
+        Self {
+            expr: Box::new(expr),
+            relation: relation.map(|r| r.into()),
+            name: name.into(),
+            metadata: None,
+            is_internal: true,
         }
     }
 
     pub fn with_metadata(mut self, metadata: Option<FieldMetadata>) -> Self {
         self.metadata = metadata;
         self
+    }
+
+    #[doc(hidden)]
+    pub fn with_expr(mut self, expr: Expr) -> Self {
+        self.expr = Box::new(expr);
+        self
+    }
+
+    #[doc(hidden)]
+    pub fn try_map_expr(self, f: impl FnOnce(Expr) -> Result<Expr>) -> Result<Expr> {
+        let Alias {
+            expr,
+            relation,
+            name,
+            metadata,
+            is_internal,
+        } = self;
+        Ok(Expr::Alias(Alias {
+            expr: Box::new(f(*expr)?),
+            relation,
+            name,
+            metadata,
+            is_internal,
+        }))
     }
 }
 
@@ -1722,6 +1765,11 @@ impl Expr {
         Expr::Alias(Alias::new(self, None::<&str>, name.into()))
     }
 
+    #[doc(hidden)]
+    pub fn alias_internal(self, name: impl Into<String>) -> Expr {
+        Expr::Alias(Alias::new_internal(self, None::<&str>, name.into()))
+    }
+
     /// Return `self AS name` alias expression with metadata
     ///
     /// The metadata will be attached to the Arrow Schema field when the expression
@@ -1753,6 +1801,15 @@ impl Expr {
         Expr::Alias(Alias::new(self, relation, name.into()))
     }
 
+    #[doc(hidden)]
+    pub fn alias_qualified_internal(
+        self,
+        relation: Option<impl Into<TableReference>>,
+        name: impl Into<String>,
+    ) -> Expr {
+        Expr::Alias(Alias::new_internal(self, relation, name.into()))
+    }
+
     /// Return `self AS name` alias expression with a specific qualifier and metadata
     ///
     /// The metadata will be attached to the Arrow Schema field when the expression
@@ -1775,6 +1832,11 @@ impl Expr {
         metadata: Option<FieldMetadata>,
     ) -> Expr {
         Expr::Alias(Alias::new(self, relation, name.into()).with_metadata(metadata))
+    }
+
+    #[doc(hidden)]
+    pub fn alias_with_existing(self, alias: &Alias) -> Expr {
+        Expr::Alias(alias.clone().with_expr(self))
     }
 
     /// Remove an alias from an expression if one exists.
@@ -1846,7 +1908,7 @@ impl Expr {
                     match alias
                         .metadata
                         .as_ref()
-                        .map(|h| h.is_empty())
+                        .map(|metadata| metadata.is_empty())
                         .unwrap_or(true)
                     {
                         true => Ok(Transformed::yes(*alias.expr)),
@@ -2261,17 +2323,21 @@ impl NormalizeEq for Expr {
                     expr: self_expr,
                     relation: self_relation,
                     name: self_name,
-                    ..
+                    metadata: self_metadata,
+                    is_internal: self_is_internal,
                 }),
                 Expr::Alias(Alias {
                     expr: other_expr,
                     relation: other_relation,
                     name: other_name,
-                    ..
+                    metadata: other_metadata,
+                    is_internal: other_is_internal,
                 }),
             ) => {
                 self_name == other_name
                     && self_relation == other_relation
+                    && self_metadata == other_metadata
+                    && self_is_internal == other_is_internal
                     && self_expr.normalize_eq(other_expr)
             }
             (
@@ -2617,10 +2683,13 @@ impl HashNode for Expr {
                 expr: _expr,
                 relation,
                 name,
-                ..
+                metadata,
+                is_internal,
             }) => {
                 relation.hash(state);
                 name.hash(state);
+                metadata.hash(state);
+                is_internal.hash(state);
             }
             Expr::Column(column) => {
                 column.hash(state);
@@ -4046,6 +4115,65 @@ mod test {
             ),
             "column_name"
         );
+    }
+
+    #[test]
+    fn test_internal_alias_changes_equality() {
+        let user_alias = col("id").alias("count(*)");
+        let internal_alias = col("id").alias_internal("count(*)");
+
+        assert_ne!(user_alias, internal_alias);
+        assert_ne!(internal_alias, user_alias);
+    }
+
+    #[test]
+    fn test_internal_alias_changes_normalized_identity() {
+        let user_alias = col("id").alias("count(*)");
+        let internal_alias = col("id").alias_internal("count(*)");
+
+        assert!(!user_alias.normalize_eq(&internal_alias));
+        assert!(!internal_alias.normalize_eq(&user_alias));
+    }
+
+    #[test]
+    fn test_unalias_nested_respects_user_metadata() {
+        use std::collections::HashMap;
+
+        let base_expr = col("id");
+
+        let no_metadata = base_expr.clone().alias("alias");
+        assert_eq!(no_metadata.unalias_nested().data, base_expr);
+
+        let Expr::Alias(empty_metadata_alias) = base_expr.clone().alias("alias") else {
+            unreachable!();
+        };
+        let empty_metadata_alias = Expr::Alias(
+            empty_metadata_alias.with_metadata(Some(FieldMetadata::default())),
+        );
+        assert_eq!(empty_metadata_alias.unalias_nested().data, base_expr);
+
+        let internal_alias = base_expr.clone().alias_internal("alias");
+        assert_eq!(internal_alias.unalias_nested().data, base_expr);
+
+        let user_metadata = FieldMetadata::from(HashMap::from([(
+            "some_key".to_string(),
+            "some_value".to_string(),
+        )]));
+
+        let Expr::Alias(user_alias) = base_expr.clone().alias("alias") else {
+            unreachable!();
+        };
+        let user_alias =
+            Expr::Alias(user_alias.with_metadata(Some(user_metadata.clone())));
+        assert_eq!(user_alias.clone().unalias_nested().data, user_alias);
+
+        let Expr::Alias(internal_alias) = base_expr.clone().alias_internal("alias")
+        else {
+            unreachable!();
+        };
+        let internal_alias =
+            Expr::Alias(internal_alias.with_metadata(Some(user_metadata.clone())));
+        assert_eq!(internal_alias.clone().unalias_nested().data, internal_alias);
     }
 
     fn wildcard_options(

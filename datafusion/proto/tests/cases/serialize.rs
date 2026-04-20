@@ -22,6 +22,7 @@ use arrow::datatypes::{DataType, Field};
 
 use datafusion::execution::FunctionRegistry;
 use datafusion::prelude::SessionContext;
+use datafusion_common::metadata::FieldMetadata;
 use datafusion_expr::expr::Placeholder;
 use datafusion_expr::{ColumnarValue, col, create_udf, lit};
 use datafusion_expr::{Expr, Volatility};
@@ -29,6 +30,7 @@ use datafusion_functions::string;
 use datafusion_proto::bytes::Serializeable;
 use datafusion_proto::logical_plan::DefaultLogicalExtensionCodec;
 use datafusion_proto::logical_plan::to_proto::serialize_expr;
+use datafusion_proto::protobuf::logical_expr_node::ExprType;
 
 #[test]
 #[should_panic(
@@ -135,6 +137,53 @@ fn exact_roundtrip_linearized_binary_expr() {
 fn roundtrip_qualified_alias() {
     let qual_alias = col("c1").alias_qualified(Some("my_table"), "my_column");
     assert_eq!(qual_alias, roundtrip_expr(&qual_alias));
+}
+
+#[test]
+fn roundtrip_alias_with_metadata() {
+    let expr = col("c1").alias_with_metadata(
+        "my_column",
+        Some(FieldMetadata::from(std::collections::HashMap::from([(
+            "some_key".to_string(),
+            "some_value".to_string(),
+        )]))),
+    );
+    assert_eq!(expr, roundtrip_expr(&expr));
+}
+
+#[test]
+fn internal_alias_roundtrip_preserves_metadata_and_internal_flag() {
+    let Expr::Alias(alias) = col("c1").alias_internal("my_column") else {
+        unreachable!();
+    };
+    let expr = Expr::Alias(alias.with_metadata(Some(FieldMetadata::from(
+        std::collections::HashMap::from([(
+            "some_key".to_string(),
+            "some_value".to_string(),
+        )]),
+    ))));
+
+    let extension_codec = DefaultLogicalExtensionCodec {};
+    let proto = serialize_expr(&expr, &extension_codec).unwrap();
+    let Some(ExprType::Alias(alias)) = proto.expr_type else {
+        unreachable!();
+    };
+
+    assert_eq!(
+        alias.metadata.get("some_key"),
+        Some(&"some_value".to_string())
+    );
+    assert!(alias.is_internal);
+
+    let decoded = roundtrip_expr(&expr);
+    let Expr::Alias(alias) = decoded else {
+        unreachable!();
+    };
+    assert!(alias.is_internal);
+    assert_eq!(
+        alias.metadata.unwrap().to_hashmap().get("some_key"),
+        Some(&"some_value".to_string())
+    );
 }
 
 #[test]

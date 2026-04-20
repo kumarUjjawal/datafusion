@@ -101,7 +101,7 @@ pub fn count_distinct(expr: Expr) -> Expr {
 /// let expr = col(expr.schema_name().to_string());
 /// ```
 pub fn count_all() -> Expr {
-    count(Expr::Literal(COUNT_STAR_EXPANSION, None)).alias("count(*)")
+    count(Expr::Literal(COUNT_STAR_EXPANSION, None)).alias_internal("count(*)")
 }
 
 /// Creates window aggregation to count all rows.

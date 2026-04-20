@@ -255,8 +255,8 @@ fn coerce_exprs_for_schema(
             let new_type = dst_schema.field(idx).data_type();
             if new_type != &expr.get_type(src_schema)? {
                 match expr {
-                    Expr::Alias(Alias { expr, name, .. }) => {
-                        Ok(expr.cast_to(new_type, src_schema)?.alias(name))
+                    Expr::Alias(alias) => {
+                        alias.try_map_expr(|expr| expr.cast_to(new_type, src_schema))
                     }
                     #[expect(deprecated)]
                     Expr::Wildcard { .. } => Ok(expr),
@@ -309,6 +309,7 @@ pub enum SavedName {
     Saved {
         relation: Option<TableReference>,
         name: String,
+        is_internal_generated: bool,
     },
     /// Name is not preserved
     None,
@@ -340,8 +341,23 @@ impl NamePreserver {
 
     pub fn save(&self, expr: &Expr) -> SavedName {
         if self.use_alias {
-            let (relation, name) = expr.qualified_name();
-            SavedName::Saved { relation, name }
+            match expr {
+                Expr::Alias(alias) => SavedName::Saved {
+                    relation: alias.relation.clone(),
+                    name: alias.name.clone(),
+                    is_internal_generated: alias.is_internal,
+                },
+                _ => {
+                    // Rewrites preserve this output name for schema stability, but the
+                    // alias itself is planner-generated rather than user-written.
+                    let (relation, name) = expr.qualified_name();
+                    SavedName::Saved {
+                        relation,
+                        name,
+                        is_internal_generated: true,
+                    }
+                }
+            }
         } else {
             SavedName::None
         }
@@ -352,10 +368,18 @@ impl SavedName {
     /// Ensures the qualified name of the rewritten expression is preserved
     pub fn restore(self, expr: Expr) -> Expr {
         match self {
-            SavedName::Saved { relation, name } => {
+            SavedName::Saved {
+                relation,
+                name,
+                is_internal_generated,
+            } => {
                 let (new_relation, new_name) = expr.qualified_name();
                 if new_relation != relation || new_name != name {
-                    expr.alias_qualified(relation, name)
+                    if is_internal_generated {
+                        expr.alias_qualified_internal(relation, name)
+                    } else {
+                        expr.alias_qualified(relation, name)
+                    }
                 } else {
                     expr
                 }
@@ -541,6 +565,20 @@ mod test {
             Expr::Column(Column::new_unqualified("test.a")),
             Expr::Column(Column::new(Some("test"), "a")),
         );
+    }
+
+    #[test]
+    fn test_name_preserver_marks_non_alias_restore_as_internal() {
+        let saved_name = NamePreserver::new_for_projection().save(&col("a"));
+        let restored = saved_name.restore(col("b"));
+
+        let Expr::Alias(alias) = restored else {
+            panic!("expected alias");
+        };
+
+        assert!(alias.is_internal);
+        assert_eq!(alias.name, "a");
+        assert_eq!(*alias.expr, col("b"));
     }
 
     /// rewrites `expr_from` to `rewrite_to` while preserving the original qualified name

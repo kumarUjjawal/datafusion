@@ -166,7 +166,7 @@ impl OptimizerRule for SingleDistinctToGroupBy {
                             let alias_str = format!("group_alias_{i}");
                             let (qualifier, field) = schema.qualified_field(i);
                             (
-                                group_expr.alias(alias_str.clone()),
+                                group_expr.alias_internal(alias_str.clone()),
                                 (col(alias_str), Some((qualifier, field.name()))),
                             )
                         }
@@ -202,7 +202,7 @@ impl OptimizerRule for SingleDistinctToGroupBy {
                                 if group_fields_set.insert(arg.schema_name().to_string())
                                 {
                                     inner_group_exprs
-                                        .push(arg.alias(SINGLE_DISTINCT_ALIAS));
+                                        .push(arg.alias_internal(SINGLE_DISTINCT_ALIAS));
                                 }
                                 Ok(Expr::AggregateFunction(AggregateFunction::new_udf(
                                     func,
@@ -225,7 +225,7 @@ impl OptimizerRule for SingleDistinctToGroupBy {
                                         order_by,
                                         null_treatment,
                                     ))
-                                    .alias(&alias_str),
+                                    .alias_internal(&alias_str),
                                 );
                                 Ok(Expr::AggregateFunction(AggregateFunction::new_udf(
                                     func,

@@ -575,6 +575,7 @@ fn merge_consecutive_projections(proj: Projection) -> Result<Transformed<Project
                 relation,
                 name,
                 metadata,
+                is_internal,
             }) => rewrite_expr(*expr, &prev_projection).map(|result| {
                 result.update_data(|expr| {
                     // After substitution, the inner expression may now have the
@@ -583,12 +584,19 @@ fn merge_consecutive_projections(proj: Projection) -> Result<Transformed<Project
                     // `f(x)`). Wrapping in a redundant self-alias causes a
                     // cosmetic `f(x) AS f(x)` due to Display vs schema_name
                     // formatting differences. Drop the alias when it matches.
-                    if metadata.is_none() && expr.schema_name().to_string() == name {
+                    if metadata.is_none()
+                        && !is_internal
+                        && expr.schema_name().to_string() == name
+                    {
                         expr
                     } else {
-                        Expr::Alias(
-                            Alias::new(expr, relation, name).with_metadata(metadata),
-                        )
+                        Expr::Alias(Alias {
+                            expr: Box::new(expr),
+                            relation,
+                            name,
+                            metadata,
+                            is_internal,
+                        })
                     }
                 })
             }),

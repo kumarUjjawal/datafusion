@@ -1241,19 +1241,21 @@ fn project_with_column_index(
         .enumerate()
         .map(|(i, e)| match e {
             Expr::Alias(Alias { ref name, .. }) if name != schema.field(i).name() => {
-                Ok(e.unalias().alias(schema.field(i).name()))
+                Ok(e.unalias().alias_internal(schema.field(i).name()))
             }
             Expr::Column(Column {
                 relation: _,
                 ref name,
                 spans: _,
-            }) if name != schema.field(i).name() => Ok(e.alias(schema.field(i).name())),
+            }) if name != schema.field(i).name() => {
+                Ok(e.alias_internal(schema.field(i).name()))
+            }
             Expr::Alias { .. } | Expr::Column { .. } => Ok(e),
             #[expect(deprecated)]
             Expr::Wildcard { .. } => {
                 plan_err!("Wildcard should be expanded before type coercion")
             }
-            _ => Ok(e.alias(schema.field(i).name())),
+            _ => Ok(e.alias_internal(schema.field(i).name())),
         })
         .collect::<Result<Vec<_>>>()?;
 
