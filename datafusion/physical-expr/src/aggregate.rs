@@ -460,6 +460,7 @@ impl AggregateFunctionExpr {
             .order_by(self.order_bys.clone())
             .schema(Arc::new(self.schema.clone()))
             .alias(self.name().to_string())
+            .human_display(self.human_display().to_string())
             .with_ignore_nulls(self.ignore_nulls)
             .with_distinct(self.is_distinct)
             .with_reversed(self.is_reversed)
@@ -582,18 +583,50 @@ impl AggregateFunctionExpr {
             ReversedUDAF::NotSupported => None,
             ReversedUDAF::Identical => Some(self.clone()),
             ReversedUDAF::Reversed(reverse_udf) => {
+                let aliased_human_display =
+                    strip_alias_suffix(self.human_display(), self.name())
+                        .map(str::to_string);
                 let mut name = self.name().to_string();
+                let mut human_display = self.human_display().to_string();
                 // If the function is changed, we need to reverse order_by clause as well
                 // i.e. First(a order by b asc null first) -> Last(a order by b desc null last)
-                if self.fun().name() != reverse_udf.name() {
+                if aliased_human_display.is_none()
+                    && self.fun().name() != reverse_udf.name()
+                {
                     replace_order_by_clause(&mut name);
                 }
-                replace_fn_name_clause(&mut name, self.fun.name(), reverse_udf.name());
+                if aliased_human_display.is_none() {
+                    replace_fn_name_clause(
+                        &mut name,
+                        self.fun.name(),
+                        reverse_udf.name(),
+                    );
+                }
+
+                if !human_display.is_empty() {
+                    if let Some(expr_display) = aliased_human_display {
+                        human_display = expr_display;
+                    }
+
+                    if self.fun().name() != reverse_udf.name() {
+                        replace_order_by_clause(&mut human_display);
+                    }
+                    replace_fn_name_clause(
+                        &mut human_display,
+                        self.fun.name(),
+                        reverse_udf.name(),
+                    );
+
+                    if strip_alias_suffix(self.human_display(), self.name()).is_some() {
+                        human_display = format!("{human_display} as {}", self.name());
+                    }
+                }
 
                 AggregateExprBuilder::new(reverse_udf, self.args.to_vec())
                     .order_by(self.order_bys.iter().map(|e| e.reverse()).collect())
                     .schema(Arc::new(self.schema.clone()))
                     .alias(name)
+                    .human_display(human_display)
                     .with_ignore_nulls(self.ignore_nulls)
                     .with_distinct(self.is_distinct)
                     .with_reversed(!self.is_reversed)
@@ -754,4 +787,9 @@ fn replace_order_by_clause(order_by: &mut String) {
 
 fn replace_fn_name_clause(aggr_name: &mut String, fn_name_old: &str, fn_name_new: &str) {
     *aggr_name = aggr_name.replace(fn_name_old, fn_name_new);
+}
+
+fn strip_alias_suffix<'a>(human_display: &'a str, alias: &str) -> Option<&'a str> {
+    let alias_suffix = format!(" as {alias}");
+    human_display.strip_suffix(&alias_suffix)
 }

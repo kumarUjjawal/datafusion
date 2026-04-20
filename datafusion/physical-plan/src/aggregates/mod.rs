@@ -1374,7 +1374,7 @@ impl DisplayAs for AggregateExec {
                 let a: Vec<String> = self
                     .aggr_expr
                     .iter()
-                    .map(|agg| agg.name().to_string())
+                    .map(|agg| format_aggregate_exec_expr(agg).to_string())
                     .collect();
                 write!(f, ", aggr=[{}]", a.join(", "))?;
                 if let Some(config) = self.limit_options {
@@ -1428,7 +1428,7 @@ impl DisplayAs for AggregateExec {
                 let a: Vec<String> = self
                     .aggr_expr
                     .iter()
-                    .map(|agg| agg.human_display().to_string())
+                    .map(|agg| format_tree_aggregate_expr(agg).to_string())
                     .collect();
                 writeln!(f, "mode={:?}", self.mode)?;
                 if !g.is_empty() {
@@ -1444,6 +1444,28 @@ impl DisplayAs for AggregateExec {
         }
         Ok(())
     }
+}
+
+fn format_aggregate_exec_expr(agg: &AggregateFunctionExpr) -> &str {
+    if has_aliased_human_display(agg) {
+        agg.human_display()
+    } else {
+        agg.name()
+    }
+}
+
+fn format_tree_aggregate_expr(agg: &AggregateFunctionExpr) -> &str {
+    let human_display = agg.human_display();
+    if human_display.is_empty() {
+        agg.name()
+    } else {
+        human_display
+    }
+}
+
+fn has_aliased_human_display(agg: &AggregateFunctionExpr) -> bool {
+    let alias_suffix = format!(" as {}", agg.name());
+    agg.human_display().strip_suffix(&alias_suffix).is_some()
 }
 
 impl ExecutionPlan for AggregateExec {
@@ -3020,6 +3042,32 @@ mod tests {
             .alias(String::from("last_value(b) ORDER BY [b ASC NULLS LAST]"))
             .build()
             .map(Arc::new)
+    }
+
+    #[test]
+    fn test_reverse_expr_preserves_aliased_human_display() -> Result<()> {
+        let schema = create_test_schema()?;
+        let agg = AggregateExprBuilder::new(first_value_udaf(), vec![col("b", &schema)?])
+            .order_by(vec![PhysicalSortExpr {
+                expr: col("b", &schema)?,
+                options: SortOptions::new(false, false),
+            }])
+            .schema(Arc::clone(&schema))
+            .alias("agg")
+            .human_display(
+                "first_value(b) ORDER BY [b ASC NULLS LAST] as agg".to_string(),
+            )
+            .build()?;
+
+        let reversed = agg.reverse_expr().expect("expected reverse expr");
+
+        assert_eq!(reversed.name(), "agg");
+        assert_eq!(
+            reversed.human_display(),
+            "last_value(b) ORDER BY [b DESC NULLS FIRST] as agg"
+        );
+
+        Ok(())
     }
 
     // This function constructs the physical plan below,

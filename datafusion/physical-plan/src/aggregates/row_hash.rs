@@ -561,7 +561,14 @@ impl GroupedHashAggregateStream {
 
         let agg_fn_names = aggregate_exprs
             .iter()
-            .map(|expr| expr.human_display())
+            .map(|expr| {
+                let human_display = expr.human_display();
+                if human_display.is_empty() {
+                    expr.name()
+                } else {
+                    human_display
+                }
+            })
             .collect::<Vec<_>>()
             .join(", ");
         let name = format!("GroupedHashAggregateStream[{partition}] ({agg_fn_names})");

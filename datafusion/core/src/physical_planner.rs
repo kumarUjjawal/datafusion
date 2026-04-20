@@ -2401,7 +2401,7 @@ type AggregateExprWithOptionalArgs = (
 pub fn create_aggregate_expr_with_name_and_maybe_filter(
     e: &Expr,
     name: Option<String>,
-    human_displan: String,
+    human_display: String,
     logical_input_schema: &DFSchema,
     physical_input_schema: &Schema,
     execution_props: &ExecutionProps,
@@ -2450,7 +2450,7 @@ pub fn create_aggregate_expr_with_name_and_maybe_filter(
                         .order_by(order_bys.clone())
                         .schema(Arc::new(physical_input_schema.to_owned()))
                         .alias(name)
-                        .human_display(human_displan)
+                        .human_display(human_display)
                         .with_ignore_nulls(ignore_nulls)
                         .with_distinct(*distinct)
                         .build()
@@ -2478,7 +2478,13 @@ pub fn create_aggregate_expr_and_maybe_filter(
     let (name, human_display, e) = match e {
         Expr::Alias(Alias { name, .. }) => {
             let unaliased = e.clone().unalias_nested().data;
-            (Some(name.clone()), e.human_display().to_string(), unaliased)
+            let human_display = unaliased.human_display().to_string();
+            let human_display = if human_display.is_empty() || human_display == *name {
+                name.clone()
+            } else {
+                format!("{human_display} as {name}")
+            };
+            (Some(name.clone()), human_display, unaliased)
         }
         Expr::AggregateFunction(_) => (
             Some(e.schema_name().to_string()),
@@ -3106,6 +3112,7 @@ impl<'n> TreeNodeVisitor<'n> for InvariantChecker {
 mod tests {
     use std::cmp::Ordering;
     use std::fmt::{self, Debug};
+    use std::mem::size_of_val;
     use std::ops::{BitAnd, Not};
 
     use super::*;
@@ -3121,19 +3128,22 @@ mod tests {
     use crate::execution::session_state::SessionStateBuilder;
     use arrow::array::{ArrayRef, DictionaryArray, Int32Array};
     use arrow::datatypes::{DataType, Field, Int32Type};
-    use arrow_schema::SchemaRef;
+    use arrow_schema::{FieldRef, SchemaRef};
     use datafusion_common::config::ConfigOptions;
     use datafusion_common::{
-        DFSchemaRef, TableReference, ToDFSchema as _, assert_contains,
+        DFSchemaRef, ScalarValue, TableReference, ToDFSchema as _, assert_contains,
     };
     use datafusion_execution::TaskContext;
     use datafusion_execution::runtime_env::RuntimeEnv;
     use datafusion_expr::builder::subquery_alias;
+    use datafusion_expr::function::{AccumulatorArgs, StateFieldsArgs};
     use datafusion_expr::{
-        LogicalPlanBuilder, TableSource, UserDefinedLogicalNodeCore, col, lit,
+        Accumulator, AggregateUDF, AggregateUDFImpl, ExprFunctionExt, LogicalPlanBuilder,
+        Signature, TableSource, UserDefinedLogicalNodeCore, Volatility, col, lit,
     };
     use datafusion_functions_aggregate::count::count_all;
     use datafusion_functions_aggregate::expr_fn::sum;
+    use datafusion_functions_aggregate::first_last::first_value_udaf;
     use datafusion_physical_expr::EquivalenceProperties;
     use datafusion_physical_plan::execution_plan::{Boundedness, EmissionType};
 
@@ -3156,6 +3166,83 @@ mod tests {
         planner
             .create_physical_plan(&logical_plan, &session_state)
             .await
+    }
+
+    async fn aggregate_explain(logical_plan: &LogicalPlan) -> Result<String> {
+        let physical_plan = plan(logical_plan).await?;
+        Ok(displayable(physical_plan.as_ref()).indent(true).to_string())
+    }
+
+    #[derive(Debug, Default)]
+    struct NullAccumulator;
+
+    impl Accumulator for NullAccumulator {
+        fn state(&mut self) -> Result<Vec<ScalarValue>> {
+            Ok(vec![self.evaluate()?])
+        }
+
+        fn update_batch(&mut self, _values: &[ArrayRef]) -> Result<()> {
+            Ok(())
+        }
+
+        fn merge_batch(&mut self, _states: &[ArrayRef]) -> Result<()> {
+            Ok(())
+        }
+
+        fn evaluate(&mut self) -> Result<ScalarValue> {
+            Ok(ScalarValue::Int64(None))
+        }
+
+        fn size(&self) -> usize {
+            size_of_val(self)
+        }
+    }
+
+    #[derive(Debug, Clone, PartialEq, Eq, Hash)]
+    struct CustomHumanDisplayUdaf {
+        signature: Signature,
+    }
+
+    impl CustomHumanDisplayUdaf {
+        fn new() -> Self {
+            Self {
+                signature: Signature::exact(vec![DataType::Int64], Volatility::Immutable),
+            }
+        }
+    }
+
+    impl AggregateUDFImpl for CustomHumanDisplayUdaf {
+        fn name(&self) -> &str {
+            "custom_human_display_udaf"
+        }
+
+        fn signature(&self) -> &Signature {
+            &self.signature
+        }
+
+        fn return_type(&self, _arg_types: &[DataType]) -> Result<DataType> {
+            Ok(DataType::Int64)
+        }
+
+        fn accumulator(
+            &self,
+            _acc_args: AccumulatorArgs,
+        ) -> Result<Box<dyn Accumulator>> {
+            Ok(Box::new(NullAccumulator))
+        }
+
+        fn state_fields(&self, _args: StateFieldsArgs) -> Result<Vec<FieldRef>> {
+            Ok(vec![
+                Field::new("custom_state", DataType::Int64, true).into(),
+            ])
+        }
+
+        fn human_display(&self, params: &AggregateFunctionParams) -> Result<String> {
+            Ok(format!(
+                "custom_display({})",
+                params.args[0].human_display()
+            ))
+        }
     }
 
     #[tokio::test]
@@ -3766,6 +3853,89 @@ mod tests {
             "total_rows",
             physical_plan.schema().field(0).name().as_str()
         );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_aggregate_explain_shows_aliased_expression() -> Result<()> {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("column1", DataType::Int64, false),
+            Field::new("column2", DataType::Int64, false),
+        ]));
+
+        let logical_plan = scan_empty(None, schema.as_ref(), None)?
+            .aggregate(
+                Vec::<Expr>::new(),
+                vec![
+                    sum(col("column1"))
+                        .filter(col("column2").lt_eq(lit(0_i64)))
+                        .build()?
+                        .alias("agg"),
+                ],
+            )?
+            .build()?;
+
+        assert_contains!(
+            aggregate_explain(&logical_plan).await?,
+            "AggregateExec: mode=Single, gby=[], aggr=[sum(?table?.column1) FILTER (WHERE ?table?.column2 <= Int64(0)) as agg]"
+        );
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_aggregate_explain_shows_aliased_respect_nulls() -> Result<()> {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("column1", DataType::Int64, true),
+            Field::new("column2", DataType::Int64, false),
+        ]));
+
+        let logical_plan = scan_empty(None, schema.as_ref(), None)?
+            .aggregate(
+                Vec::<Expr>::new(),
+                vec![
+                    first_value_udaf()
+                        .call(vec![col("column1")])
+                        .order_by(vec![col("column2").sort(true, true)])
+                        .null_treatment(NullTreatment::RespectNulls)
+                        .build()?
+                        .alias("agg"),
+                ],
+            )?
+            .build()?;
+
+        assert_contains!(
+            aggregate_explain(&logical_plan).await?,
+            "AggregateExec: mode=Single, gby=[], aggr=[first_value(?table?.column1) RESPECT NULLS ORDER BY [?table?.column2 ASC NULLS FIRST] as agg]"
+        );
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_aggregate_explain_shows_aliased_custom_human_display() -> Result<()> {
+        let schema = Arc::new(Schema::new(vec![Field::new(
+            "column1",
+            DataType::Int64,
+            false,
+        )]));
+
+        let logical_plan = scan_empty(None, schema.as_ref(), None)?
+            .aggregate(
+                Vec::<Expr>::new(),
+                vec![
+                    AggregateUDF::from(CustomHumanDisplayUdaf::new())
+                        .call(vec![col("column1")])
+                        .alias("agg"),
+                ],
+            )?
+            .build()?;
+
+        assert_contains!(
+            aggregate_explain(&logical_plan).await?,
+            "AggregateExec: mode=Single, gby=[], aggr=[custom_display(?table?.column1) as agg]"
+        );
+
         Ok(())
     }
 
