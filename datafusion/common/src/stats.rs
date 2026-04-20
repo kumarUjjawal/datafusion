@@ -717,7 +717,7 @@ impl Statistics {
                 ) {
                     (Some(&l), Some(&r)) => Precision::Inexact(
                         estimate_ndv_with_overlap(col_stats, item_cs, l, r)
-                            .unwrap_or_else(|| usize::max(l, r)),
+                            .unwrap_or_else(|| l.saturating_add(r)),
                     ),
                     _ => Precision::Absent,
                 };
@@ -1848,10 +1848,10 @@ mod tests {
 
         let schema = Schema::new(vec![Field::new("a", DataType::Int32, true)]);
         let merged = Statistics::try_merge_iter([&stats1, &stats2], &schema).unwrap();
-        // No min/max -> fallback to max(5, 8)
+        // No min/max -> fallback to sum of NDVs
         assert_eq!(
             merged.column_statistics[0].distinct_count,
-            Precision::Inexact(8)
+            Precision::Inexact(13)
         );
     }
 
@@ -1884,10 +1884,10 @@ mod tests {
 
         let schema = Schema::new(vec![Field::new("a", DataType::Utf8, true)]);
         let merged = Statistics::try_merge_iter([&stats1, &stats2], &schema).unwrap();
-        // distance() unsupported for strings -> fallback to max
+        // distance() unsupported for strings -> fallback to sum of NDVs
         assert_eq!(
             merged.column_statistics[0].distinct_count,
-            Precision::Inexact(8)
+            Precision::Inexact(13)
         );
     }
 
@@ -2065,8 +2065,7 @@ mod tests {
                 right_ndv: Precision::Exact(5),
                 right_min: None,
                 right_max: None,
-                // Shared merge falls back to max without bounds.
-                expected: Precision::Inexact(10),
+                expected: Precision::Inexact(15),
             },
             NdvTestCase {
                 name: "missing bounds exact plus inexact",
@@ -2076,8 +2075,7 @@ mod tests {
                 right_ndv: Precision::Inexact(5),
                 right_min: None,
                 right_max: None,
-                // Shared merge falls back to max without bounds.
-                expected: Precision::Inexact(10),
+                expected: Precision::Inexact(15),
             },
             NdvTestCase {
                 name: "missing bounds inexact plus inexact",
@@ -2087,8 +2085,7 @@ mod tests {
                 right_ndv: Precision::Inexact(3),
                 right_min: None,
                 right_max: None,
-                // Shared merge falls back to max without bounds.
-                expected: Precision::Inexact(7),
+                expected: Precision::Inexact(10),
             },
             NdvTestCase {
                 name: "exact plus absent",
