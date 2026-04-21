@@ -3903,9 +3903,9 @@ logical_plan
 01)Aggregate: groupBy=[[]], aggr=[[min(CAST(aggregate_test_100.c2 AS Float64)) AS percentile_cont(Float64(0)) WITHIN GROUP [aggregate_test_100.c2 ASC NULLS LAST]]]
 02)--TableScan: aggregate_test_100 projection=[c2]
 physical_plan
-01)AggregateExec: mode=Final, gby=[], aggr=[percentile_cont(Float64(0)) WITHIN GROUP [aggregate_test_100.c2 ASC NULLS LAST]]
+01)AggregateExec: mode=Final, gby=[], aggr=[min(aggregate_test_100.c2) as percentile_cont(Float64(0)) WITHIN GROUP [aggregate_test_100.c2 ASC NULLS LAST]]
 02)--CoalescePartitionsExec
-03)----AggregateExec: mode=Partial, gby=[], aggr=[percentile_cont(Float64(0)) WITHIN GROUP [aggregate_test_100.c2 ASC NULLS LAST]]
+03)----AggregateExec: mode=Partial, gby=[], aggr=[min(aggregate_test_100.c2) as percentile_cont(Float64(0)) WITHIN GROUP [aggregate_test_100.c2 ASC NULLS LAST]]
 04)------RepartitionExec: partitioning=RoundRobinBatch(4), input_partitions=1
 05)--------DataSourceExec: file_groups={1 group: [[WORKSPACE_ROOT/testing/data/csv/aggregate_test_100_with_dates.csv]]}, projection=[c2], file_type=csv, has_header=true
 
@@ -3916,9 +3916,9 @@ logical_plan
 01)Aggregate: groupBy=[[]], aggr=[[max(CAST(aggregate_test_100.c2 AS Float64)) AS percentile_cont(Float64(0)) WITHIN GROUP [aggregate_test_100.c2 DESC NULLS FIRST]]]
 02)--TableScan: aggregate_test_100 projection=[c2]
 physical_plan
-01)AggregateExec: mode=Final, gby=[], aggr=[percentile_cont(Float64(0)) WITHIN GROUP [aggregate_test_100.c2 DESC NULLS FIRST]]
+01)AggregateExec: mode=Final, gby=[], aggr=[max(aggregate_test_100.c2) as percentile_cont(Float64(0)) WITHIN GROUP [aggregate_test_100.c2 DESC NULLS FIRST]]
 02)--CoalescePartitionsExec
-03)----AggregateExec: mode=Partial, gby=[], aggr=[percentile_cont(Float64(0)) WITHIN GROUP [aggregate_test_100.c2 DESC NULLS FIRST]]
+03)----AggregateExec: mode=Partial, gby=[], aggr=[max(aggregate_test_100.c2) as percentile_cont(Float64(0)) WITHIN GROUP [aggregate_test_100.c2 DESC NULLS FIRST]]
 04)------RepartitionExec: partitioning=RoundRobinBatch(4), input_partitions=1
 05)--------DataSourceExec: file_groups={1 group: [[WORKSPACE_ROOT/testing/data/csv/aggregate_test_100_with_dates.csv]]}, projection=[c2], file_type=csv, has_header=true
 
@@ -3929,9 +3929,9 @@ logical_plan
 01)Aggregate: groupBy=[[]], aggr=[[min(CAST(aggregate_test_100.c2 AS Float64)) AS percentile_cont(aggregate_test_100.c2,Float64(0))]]
 02)--TableScan: aggregate_test_100 projection=[c2]
 physical_plan
-01)AggregateExec: mode=Final, gby=[], aggr=[percentile_cont(aggregate_test_100.c2,Float64(0))]
+01)AggregateExec: mode=Final, gby=[], aggr=[min(aggregate_test_100.c2) as percentile_cont(aggregate_test_100.c2,Float64(0))]
 02)--CoalescePartitionsExec
-03)----AggregateExec: mode=Partial, gby=[], aggr=[percentile_cont(aggregate_test_100.c2,Float64(0))]
+03)----AggregateExec: mode=Partial, gby=[], aggr=[min(aggregate_test_100.c2) as percentile_cont(aggregate_test_100.c2,Float64(0))]
 04)------RepartitionExec: partitioning=RoundRobinBatch(4), input_partitions=1
 05)--------DataSourceExec: file_groups={1 group: [[WORKSPACE_ROOT/testing/data/csv/aggregate_test_100_with_dates.csv]]}, projection=[c2], file_type=csv, has_header=true
 
@@ -3942,9 +3942,9 @@ logical_plan
 01)Aggregate: groupBy=[[]], aggr=[[max(CAST(aggregate_test_100.c2 AS Float64)) AS percentile_cont(aggregate_test_100.c2,Float64(1))]]
 02)--TableScan: aggregate_test_100 projection=[c2]
 physical_plan
-01)AggregateExec: mode=Final, gby=[], aggr=[percentile_cont(aggregate_test_100.c2,Float64(1))]
+01)AggregateExec: mode=Final, gby=[], aggr=[max(aggregate_test_100.c2) as percentile_cont(aggregate_test_100.c2,Float64(1))]
 02)--CoalescePartitionsExec
-03)----AggregateExec: mode=Partial, gby=[], aggr=[percentile_cont(aggregate_test_100.c2,Float64(1))]
+03)----AggregateExec: mode=Partial, gby=[], aggr=[max(aggregate_test_100.c2) as percentile_cont(aggregate_test_100.c2,Float64(1))]
 04)------RepartitionExec: partitioning=RoundRobinBatch(4), input_partitions=1
 05)--------DataSourceExec: file_groups={1 group: [[WORKSPACE_ROOT/testing/data/csv/aggregate_test_100_with_dates.csv]]}, projection=[c2], file_type=csv, has_header=true
 
@@ -7552,6 +7552,18 @@ query I
 SELECT FIRST_VALUE(column1 ORDER BY column2) IGNORE NULLS FROM t;
 ----
 4
+
+query TT
+EXPLAIN SELECT FIRST_VALUE(column1 ORDER BY column2 ASC NULLS FIRST) RESPECT NULLS AS agg FROM t;
+----
+logical_plan
+01)Projection: first_value(t.column1) RESPECT NULLS ORDER BY [t.column2 ASC NULLS FIRST] AS agg
+02)--Aggregate: groupBy=[[]], aggr=[[first_value(t.column1) RESPECT NULLS ORDER BY [t.column2 ASC NULLS FIRST]]]
+03)----TableScan: t projection=[column1, column2]
+physical_plan
+01)ProjectionExec: expr=[first_value(t.column1) RESPECT NULLS ORDER BY [t.column2 ASC NULLS FIRST]@0 as agg]
+02)--AggregateExec: mode=Single, gby=[], aggr=[first_value(t.column1) RESPECT NULLS ORDER BY [t.column2 ASC NULLS FIRST]]
+03)----DataSourceExec: partitions=1, partition_sizes=[1]
 
 statement ok
 DROP TABLE t;
