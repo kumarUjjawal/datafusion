@@ -18,8 +18,9 @@
 use std::sync::Arc;
 
 use arrow::array::{
-    Array, ArrayRef, AsArray, ByteView, GenericStringBuilder, PrimitiveArray,
-    StringArrayType, StringLikeArrayBuilder, StringViewArray, make_view, new_null_array,
+    Array, ArrayRef, AsArray, ByteView, GenericStringArray, GenericStringBuilder,
+    OffsetSizeTrait, PrimitiveArray, StringArrayType, StringLikeArrayBuilder,
+    StringViewArray, make_view, new_null_array,
 };
 use arrow::buffer::ScalarBuffer;
 use arrow::datatypes::{DataType, Int64Type};
@@ -152,7 +153,7 @@ fn substr_index(args: &[ArrayRef]) -> Result<ArrayRef> {
                 count_array,
                 GenericStringBuilder::<i32>::with_capacity(
                     string_array.len(),
-                    string_array.value_data().len(),
+                    visible_string_bytes(string_array),
                 ),
             )
         }
@@ -166,7 +167,7 @@ fn substr_index(args: &[ArrayRef]) -> Result<ArrayRef> {
                 count_array,
                 GenericStringBuilder::<i64>::with_capacity(
                     string_array.len(),
-                    string_array.value_data().len(),
+                    visible_string_bytes(string_array),
                 ),
             )
         }
@@ -230,7 +231,7 @@ fn substr_index_scalar(
                 count,
                 GenericStringBuilder::<i32>::with_capacity(
                     arr.len(),
-                    arr.value_data().len(),
+                    visible_string_bytes(arr),
                 ),
             )
         }
@@ -242,7 +243,7 @@ fn substr_index_scalar(
                 count,
                 GenericStringBuilder::<i64>::with_capacity(
                     arr.len(),
-                    arr.value_data().len(),
+                    visible_string_bytes(arr),
                 ),
             )
         }
@@ -250,6 +251,14 @@ fn substr_index_scalar(
     }?;
 
     Ok(ColumnarValue::Array(result))
+}
+
+#[inline]
+fn visible_string_bytes<T: OffsetSizeTrait>(
+    string_array: &GenericStringArray<T>,
+) -> usize {
+    let offsets = string_array.value_offsets();
+    offsets[offsets.len() - 1].as_usize() - offsets[0].as_usize()
 }
 
 fn substr_index_general<'a, S, B>(
