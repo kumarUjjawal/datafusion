@@ -94,7 +94,8 @@ STORED AS PARQUET;
 ----
 0
 
-# All partition's output_rows: [4, 0, 1, 0]
+# Mixed files can be redistributed across scan partitions by shared work
+# stealing, so the exact skew value is not stable across environments.
 statement ok
 CREATE EXTERNAL TABLE skew_parquet
 STORED AS PARQUET
@@ -103,7 +104,7 @@ LOCATION 'test_files/scratch/explain_analyze/output_rows_skew';
 query TT
 EXPLAIN ANALYZE SELECT * FROM skew_parquet;
 ----
-Plan with Metrics DataSourceExec: <slt:ignore>output_rows_skew=84.31%<slt:ignore>
+Plan with Metrics DataSourceExec: <slt:ignore>output_rows_skew=<slt:ignore>%<slt:ignore>
 
 # All partition's output_rows: [0]
 statement ok
