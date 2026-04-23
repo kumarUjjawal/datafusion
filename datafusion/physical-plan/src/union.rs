@@ -48,6 +48,7 @@ use crate::stream::ObservedStream;
 use arrow::datatypes::{Field, Schema, SchemaRef};
 use arrow::record_batch::RecordBatch;
 use datafusion_common::config::ConfigOptions;
+use datafusion_common::stats::NdvFallback;
 use datafusion_common::tree_node::TreeNodeRecursion;
 use datafusion_common::{
     Result, assert_or_internal_err, exec_err, internal_datafusion_err,
@@ -834,7 +835,7 @@ fn merge_input_statistics(
         })
         .collect::<Result<Vec<_>>>()?;
 
-    Statistics::try_merge_iter(stats.iter(), schema)
+    Statistics::try_merge_iter_with_ndv_fallback(stats.iter(), schema, NdvFallback::Sum)
 }
 
 #[cfg(test)]
@@ -948,9 +949,100 @@ mod tests {
         (schema, left, right, expected)
     }
 
+    fn stats_merge_multicolumn_inputs() -> (SchemaRef, Statistics, Statistics, Statistics)
+    {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("a", DataType::Int64, true),
+            Field::new("b", DataType::Utf8, true),
+            Field::new("c", DataType::Float32, true),
+        ]));
+
+        let left = Statistics::default()
+            .with_num_rows(Precision::Exact(5))
+            .with_total_byte_size(Precision::Exact(23))
+            .add_column_statistics(
+                ColumnStatistics::new_unknown()
+                    .with_distinct_count(Precision::Exact(5))
+                    .with_min_value(Precision::Exact(ScalarValue::Int64(Some(-4))))
+                    .with_max_value(Precision::Exact(ScalarValue::Int64(Some(21))))
+                    .with_sum_value(Precision::Exact(ScalarValue::Int64(Some(42))))
+                    .with_null_count(Precision::Exact(0)),
+            )
+            .add_column_statistics(
+                ColumnStatistics::new_unknown()
+                    .with_distinct_count(Precision::Exact(2))
+                    .with_min_value(Precision::Exact(ScalarValue::from("a")))
+                    .with_max_value(Precision::Exact(ScalarValue::from("x")))
+                    .with_null_count(Precision::Exact(3)),
+            )
+            .add_column_statistics(
+                ColumnStatistics::new_unknown()
+                    .with_max_value(Precision::Exact(ScalarValue::Float32(Some(1.1))))
+                    .with_min_value(Precision::Exact(ScalarValue::Float32(Some(0.1))))
+                    .with_sum_value(Precision::Exact(ScalarValue::Float32(Some(42.0)))),
+            );
+
+        let right = Statistics::default()
+            .with_num_rows(Precision::Exact(7))
+            .with_total_byte_size(Precision::Exact(29))
+            .add_column_statistics(
+                ColumnStatistics::new_unknown()
+                    .with_distinct_count(Precision::Exact(3))
+                    .with_min_value(Precision::Exact(ScalarValue::Int64(Some(1))))
+                    .with_max_value(Precision::Exact(ScalarValue::Int64(Some(34))))
+                    .with_sum_value(Precision::Exact(ScalarValue::Int64(Some(42))))
+                    .with_null_count(Precision::Exact(1)),
+            )
+            .add_column_statistics(
+                ColumnStatistics::new_unknown()
+                    .with_distinct_count(Precision::Exact(3))
+                    .with_min_value(Precision::Exact(ScalarValue::from("b")))
+                    .with_max_value(Precision::Exact(ScalarValue::from("z"))),
+            )
+            .add_column_statistics(ColumnStatistics::new_unknown());
+
+        let expected = Statistics::default()
+            .with_num_rows(Precision::Exact(12))
+            .with_total_byte_size(Precision::Exact(52))
+            .add_column_statistics(
+                ColumnStatistics::new_unknown()
+                    .with_distinct_count(Precision::Inexact(6))
+                    .with_min_value(Precision::Exact(ScalarValue::Int64(Some(-4))))
+                    .with_max_value(Precision::Exact(ScalarValue::Int64(Some(34))))
+                    .with_sum_value(Precision::Exact(ScalarValue::Int64(Some(84))))
+                    .with_null_count(Precision::Exact(1)),
+            )
+            .add_column_statistics(
+                ColumnStatistics::new_unknown()
+                    .with_distinct_count(Precision::Inexact(5))
+                    .with_min_value(Precision::Exact(ScalarValue::from("a")))
+                    .with_max_value(Precision::Exact(ScalarValue::from("z"))),
+            )
+            .add_column_statistics(ColumnStatistics::new_unknown());
+
+        (schema, left, right, expected)
+    }
+
     #[test]
     fn test_union_partition_statistics_uses_shared_statistics_merge() -> Result<()> {
         let (schema, left, right, expected) = stats_merge_inputs();
+
+        let left: Arc<dyn ExecutionPlan> =
+            Arc::new(StatisticsExec::new(left, schema.as_ref().clone()));
+        let right: Arc<dyn ExecutionPlan> =
+            Arc::new(StatisticsExec::new(right, schema.as_ref().clone()));
+
+        let union = UnionExec::try_new(vec![left, right])?;
+        let stats = union.partition_statistics(None)?;
+
+        assert_eq!(stats.as_ref(), &expected);
+        Ok(())
+    }
+
+    #[test]
+    fn test_union_partition_statistics_uses_shared_statistics_merge_multicolumn()
+    -> Result<()> {
+        let (schema, left, right, expected) = stats_merge_multicolumn_inputs();
 
         let left: Arc<dyn ExecutionPlan> =
             Arc::new(StatisticsExec::new(left, schema.as_ref().clone()));

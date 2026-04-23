@@ -372,6 +372,27 @@ pub struct Statistics {
     pub column_statistics: Vec<ColumnStatistics>,
 }
 
+/// Fallback to use when NDV overlap can not be estimated from column bounds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum NdvFallback {
+    /// Use the larger input NDV. This is the conservative default for
+    /// related fragments such as files from the same table.
+    #[default]
+    Max,
+    /// Sum the input NDVs. This is a conservative upper bound for
+    /// independent inputs such as `UNION ALL`.
+    Sum,
+}
+
+impl NdvFallback {
+    fn merge(self, left: usize, right: usize) -> usize {
+        match self {
+            Self::Max => usize::max(left, right),
+            Self::Sum => left.saturating_add(right),
+        }
+    }
+}
+
 impl Default for Statistics {
     /// Returns a new [`Statistics`] instance with all fields set to unknown
     /// and no columns.
@@ -630,6 +651,9 @@ impl Statistics {
     /// The method assumes that all statistics are for the same schema.
     /// If not, maybe you can call `SchemaMapper::map_column_statistics` to make them consistent.
     ///
+    /// This method uses [`NdvFallback::Max`] when `distinct_count` overlap
+    /// can not be estimated from column bounds.
+    ///
     /// Returns an error if the statistics do not match the specified schemas.
     ///
     /// # Example
@@ -670,6 +694,19 @@ impl Statistics {
     ///     Precision::Exact(ScalarValue::Int64(Some(1500))));
     /// ```
     pub fn try_merge_iter<'a, I>(items: I, schema: &Schema) -> Result<Statistics>
+    where
+        I: IntoIterator<Item = &'a Statistics>,
+    {
+        Self::try_merge_iter_with_ndv_fallback(items, schema, NdvFallback::Max)
+    }
+
+    /// Same as [`Statistics::try_merge_iter`], but lets callers choose the
+    /// fallback used when `distinct_count` overlap can not be estimated.
+    pub fn try_merge_iter_with_ndv_fallback<'a, I>(
+        items: I,
+        schema: &Schema,
+        ndv_fallback: NdvFallback,
+    ) -> Result<Statistics>
     where
         I: IntoIterator<Item = &'a Statistics>,
     {
@@ -717,7 +754,7 @@ impl Statistics {
                 ) {
                     (Some(&l), Some(&r)) => Precision::Inexact(
                         estimate_ndv_with_overlap(col_stats, item_cs, l, r)
-                            .unwrap_or_else(|| l.saturating_add(r)),
+                            .unwrap_or_else(|| ndv_fallback.merge(l, r)),
                     ),
                     _ => Precision::Absent,
                 };
@@ -1489,12 +1526,17 @@ mod tests {
     fn merge_single_i64_ndv_distinct_count(
         left: Statistics,
         right: Statistics,
+        ndv_fallback: NdvFallback,
     ) -> Precision<usize> {
         let schema = Schema::new(vec![Field::new("a", DataType::Int64, true)]);
 
-        Statistics::try_merge_iter([&left, &right], &schema)
-            .unwrap()
-            .column_statistics[0]
+        Statistics::try_merge_iter_with_ndv_fallback(
+            [&left, &right],
+            &schema,
+            ndv_fallback,
+        )
+        .unwrap()
+        .column_statistics[0]
             .distinct_count
     }
 
@@ -1848,10 +1890,10 @@ mod tests {
 
         let schema = Schema::new(vec![Field::new("a", DataType::Int32, true)]);
         let merged = Statistics::try_merge_iter([&stats1, &stats2], &schema).unwrap();
-        // No min/max -> fallback to sum of NDVs
+        // No min/max -> default fallback is max
         assert_eq!(
             merged.column_statistics[0].distinct_count,
-            Precision::Inexact(13)
+            Precision::Inexact(8)
         );
     }
 
@@ -1884,7 +1926,49 @@ mod tests {
 
         let schema = Schema::new(vec![Field::new("a", DataType::Utf8, true)]);
         let merged = Statistics::try_merge_iter([&stats1, &stats2], &schema).unwrap();
-        // distance() unsupported for strings -> fallback to sum of NDVs
+        // distance() unsupported for strings -> default fallback is max
+        assert_eq!(
+            merged.column_statistics[0].distinct_count,
+            Precision::Inexact(8)
+        );
+    }
+
+    #[test]
+    fn test_try_merge_ndv_non_numeric_types_sum_fallback() {
+        let stats1 = Statistics::default()
+            .with_num_rows(Precision::Exact(10))
+            .add_column_statistics(
+                ColumnStatistics::new_unknown()
+                    .with_min_value(Precision::Exact(ScalarValue::Utf8(Some(
+                        "aaa".to_string(),
+                    ))))
+                    .with_max_value(Precision::Exact(ScalarValue::Utf8(Some(
+                        "zzz".to_string(),
+                    ))))
+                    .with_distinct_count(Precision::Exact(5)),
+            );
+        let stats2 = Statistics::default()
+            .with_num_rows(Precision::Exact(10))
+            .add_column_statistics(
+                ColumnStatistics::new_unknown()
+                    .with_min_value(Precision::Exact(ScalarValue::Utf8(Some(
+                        "bbb".to_string(),
+                    ))))
+                    .with_max_value(Precision::Exact(ScalarValue::Utf8(Some(
+                        "yyy".to_string(),
+                    ))))
+                    .with_distinct_count(Precision::Exact(8)),
+            );
+
+        let schema = Schema::new(vec![Field::new("a", DataType::Utf8, true)]);
+        let merged = Statistics::try_merge_iter_with_ndv_fallback(
+            [&stats1, &stats2],
+            &schema,
+            NdvFallback::Sum,
+        )
+        .unwrap();
+
+        // distance() unsupported for strings -> sum fallback is caller-selected
         assert_eq!(
             merged.column_statistics[0].distinct_count,
             Precision::Inexact(13)
@@ -2113,6 +2197,7 @@ mod tests {
             let actual = merge_single_i64_ndv_distinct_count(
                 make_single_i64_ndv_stats(case.left_ndv, case.left_min, case.left_max),
                 make_single_i64_ndv_stats(case.right_ndv, case.right_min, case.right_max),
+                NdvFallback::Sum,
             );
 
             assert_eq!(actual, case.expected, "case {} failed", case.name);
