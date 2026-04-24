@@ -1346,12 +1346,8 @@ fn rewrite_projection(
     }
 }
 
-/// Creates a filter node without re-validating predicate type.
 fn make_filter(predicate: Expr, input: Arc<LogicalPlan>) -> Result<LogicalPlan> {
-    // PushDownFilter only rebuilds predicates that already came from validated
-    // filter/join expressions, so re-running full boolean type validation here
-    // only recomputes expensive expression schemas.
-    Ok(LogicalPlan::Filter(Filter::new_unchecked(predicate, input)))
+    Filter::try_new(predicate, input).map(LogicalPlan::Filter)
 }
 
 /// Replace the existing child of the single input node with `new_child`.
