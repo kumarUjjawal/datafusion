@@ -134,7 +134,7 @@ fn render_section(
 
     for (idx, rule) in rules.iter().enumerate() {
         let anchor = rule_anchor(stage, idx);
-        let _ = writeln!(docs, "<a id=\"{anchor}\"></a>");
+        let _ = writeln!(docs, "({anchor})=");
         let _ = writeln!(docs);
         match &rule.phase {
             Some(phase) => {

@@ -42,7 +42,7 @@ These rules run before logical optimization. They prepare the logical plan for l
 | 1     | [`resolve_grouping_function`](#analyzer-rule-1) | -     | Rewrites `GROUPING(...)` calls into expressions over DataFusion's internal grouping id. |
 | 2     | [`type_coercion`](#analyzer-rule-2)             | -     | Adds implicit casts so operators and functions receive valid input types.               |
 
-<a id="analyzer-rule-1"></a>
+(analyzer-rule-1)=
 
 ### `resolve_grouping_function`
 
@@ -52,7 +52,7 @@ Rewrites `GROUPING(...)` calls into expressions over DataFusion's internal group
 
 The plan contains `GROUPING` expressions produced by `GROUPING SETS`, `ROLLUP`, or `CUBE`.
 
-<a id="analyzer-rule-2"></a>
+(analyzer-rule-2)=
 
 ### `type_coercion`
 
@@ -93,7 +93,7 @@ These rules rewrite `LogicalPlan` nodes while preserving query results.
 | 23    | [`push_down_leaf_projections`](#logical-rule-23)              | -     | Pushes the helper projections created by leaf extraction toward leaf inputs.                                                |
 | 24    | [`optimize_projections`](#logical-rule-24)                    | -     | Prunes unused columns and removes unnecessary logical projections.                                                          |
 
-<a id="logical-rule-1"></a>
+(logical-rule-1)=
 
 ### `rewrite_set_comparison`
 
@@ -103,7 +103,7 @@ Rewrites `ANY` and `ALL` set-comparison subqueries into `EXISTS`-based boolean e
 
 A filter or expression contains a set comparison such as `= ANY`, `< ALL`, or similar constructs.
 
-<a id="logical-rule-2"></a>
+(logical-rule-2)=
 
 ### `optimize_unions`
 
@@ -113,7 +113,7 @@ Flattens nested unions and removes unions with a single input.
 
 The logical plan contains `UNION` nodes, including nested unions or distinct-over-union shapes.
 
-<a id="logical-rule-3"></a>
+(logical-rule-3)=
 
 ### `simplify_expressions`
 
@@ -123,7 +123,7 @@ Constant-folds and simplifies expressions while preserving output names.
 
 Expressions contain literals, redundant boolean logic, removable casts, or other simplifiable patterns.
 
-<a id="logical-rule-4"></a>
+(logical-rule-4)=
 
 ### `replace_distinct_aggregate`
 
@@ -133,7 +133,7 @@ Rewrites `DISTINCT` and `DISTINCT ON` operators into aggregate-based plans that 
 
 The plan contains logical `Distinct` operators.
 
-<a id="logical-rule-5"></a>
+(logical-rule-5)=
 
 ### `eliminate_join`
 
@@ -143,7 +143,7 @@ Replaces keyless inner joins with a literal `false` filter by an empty relation.
 
 An inner join has no join keys and its join filter is the literal boolean `false`.
 
-<a id="logical-rule-6"></a>
+(logical-rule-6)=
 
 ### `decorrelate_predicate_subquery`
 
@@ -153,7 +153,7 @@ Converts eligible `IN` and `EXISTS` predicate subqueries into semi or anti joins
 
 A filter contains predicate subqueries that can be decorrelated into joins.
 
-<a id="logical-rule-7"></a>
+(logical-rule-7)=
 
 ### `scalar_subquery_to_join`
 
@@ -163,7 +163,7 @@ Rewrites eligible scalar subqueries into joins and adds schema-preserving projec
 
 A filter or projection contains scalar subqueries that can be decorrelated into joins.
 
-<a id="logical-rule-8"></a>
+(logical-rule-8)=
 
 ### `decorrelate_lateral_join`
 
@@ -173,7 +173,7 @@ Rewrites eligible lateral joins into regular joins.
 
 The plan contains lateral joins with correlated input that can be pulled up safely.
 
-<a id="logical-rule-9"></a>
+(logical-rule-9)=
 
 ### `extract_equijoin_predicate`
 
@@ -183,7 +183,7 @@ Splits join filters into equijoin keys and residual predicates.
 
 A join filter contains equality predicates that can become explicit join keys.
 
-<a id="logical-rule-10"></a>
+(logical-rule-10)=
 
 ### `eliminate_duplicated_expr`
 
@@ -193,7 +193,7 @@ Removes duplicate expressions from projections, aggregates, and similar operator
 
 The same logical expression appears more than once in a plan node input list.
 
-<a id="logical-rule-11"></a>
+(logical-rule-11)=
 
 ### `eliminate_filter`
 
@@ -203,7 +203,7 @@ Drops always-true filters and replaces always-false or NULL filters with empty r
 
 A filter predicate simplifies to a constant boolean value or NULL.
 
-<a id="logical-rule-12"></a>
+(logical-rule-12)=
 
 ### `eliminate_cross_join`
 
@@ -213,7 +213,7 @@ Uses filter predicates to replace cross joins with inner joins when join keys ca
 
 A filter above a cross join exposes equijoin conditions between the inputs.
 
-<a id="logical-rule-13"></a>
+(logical-rule-13)=
 
 ### `eliminate_limit`
 
@@ -223,7 +223,7 @@ Removes no-op limits and simplifies trivial limit shapes.
 
 The plan contains limits that can be proven redundant or can collapse to simpler forms.
 
-<a id="logical-rule-14"></a>
+(logical-rule-14)=
 
 ### `propagate_empty_relation`
 
@@ -233,7 +233,7 @@ Pushes empty-relation knowledge upward so operators fed by no rows collapse earl
 
 Any subtree is already known to return no rows.
 
-<a id="logical-rule-15"></a>
+(logical-rule-15)=
 
 ### `filter_null_join_keys`
 
@@ -243,7 +243,7 @@ Adds `IS NOT NULL` filters to nullable equijoin keys that can never match.
 
 A join uses equijoin keys with `NULL != NULL` semantics and a nullable side can be filtered early.
 
-<a id="logical-rule-16"></a>
+(logical-rule-16)=
 
 ### `eliminate_outer_join`
 
@@ -253,7 +253,7 @@ Rewrites outer joins to inner joins when later filters reject the NULL-extended 
 
 A filter above a left, right, or full outer join makes unmatched rows impossible.
 
-<a id="logical-rule-17"></a>
+(logical-rule-17)=
 
 ### `push_down_limit`
 
@@ -263,7 +263,7 @@ Moves literal limits closer to scans and unions and merges adjacent limits.
 
 The plan contains literal `LIMIT` or `OFFSET` values that can be applied earlier.
 
-<a id="logical-rule-18"></a>
+(logical-rule-18)=
 
 ### `push_down_filter`
 
@@ -273,7 +273,7 @@ Moves filters as early as possible through filter-commutative operators.
 
 A filter can be pushed below projections, joins, aggregates, scans, or other supported operators.
 
-<a id="logical-rule-19"></a>
+(logical-rule-19)=
 
 ### `single_distinct_aggregation_to_group_by`
 
@@ -283,7 +283,7 @@ Rewrites single-column `DISTINCT` aggregations into two-stage `GROUP BY` plans.
 
 All distinct aggregates operate on the same input expression and the remaining aggregates fit the rule's supported patterns.
 
-<a id="logical-rule-20"></a>
+(logical-rule-20)=
 
 ### `eliminate_group_by_constant`
 
@@ -293,7 +293,7 @@ Removes constant or functionally redundant expressions from `GROUP BY`.
 
 Grouping expressions contain constants or values already determined by other grouping keys.
 
-<a id="logical-rule-21"></a>
+(logical-rule-21)=
 
 ### `common_sub_expression_eliminate`
 
@@ -303,7 +303,7 @@ Computes repeated subexpressions once and reuses the result.
 
 The same expression is repeated within a projection, aggregate, sort, or window operator.
 
-<a id="logical-rule-22"></a>
+(logical-rule-22)=
 
 ### `extract_leaf_expressions`
 
@@ -313,7 +313,7 @@ Pulls cheap leaf expressions closer to data sources so later pruning and filter 
 
 Expressions such as field access or other leaf extraction can be materialized lower in the plan.
 
-<a id="logical-rule-23"></a>
+(logical-rule-23)=
 
 ### `push_down_leaf_projections`
 
@@ -323,7 +323,7 @@ Pushes the helper projections created by leaf extraction toward leaf inputs.
 
 The previous leaf-extraction pass introduced helper projections that can move lower in the plan.
 
-<a id="logical-rule-24"></a>
+(logical-rule-24)=
 
 ### `optimize_projections`
 
@@ -362,7 +362,7 @@ These rules rewrite `ExecutionPlan` nodes after physical planning, usually to sa
 | 21    | [`FilterPushdown(Post)`](#physical-rule-21)        | post-optimization phase | Pushes dynamic filters at the end of optimization, after plan references stop moving.                        |
 | 22    | [`SanityCheckPlan`](#physical-rule-22)             | -                       | Validates that the final physical plan meets ordering, distribution, and infinite-input safety requirements. |
 
-<a id="physical-rule-1"></a>
+(physical-rule-1)=
 
 ### `OutputRequirements` (add phase)
 
@@ -378,7 +378,7 @@ Physical optimization starts and the plan's top-level output requirements need t
 
 - This pass inserts temporary `OutputRequirementExec` nodes that a later remove phase strips away.
 
-<a id="physical-rule-2"></a>
+(physical-rule-2)=
 
 ### `aggregate_statistics`
 
@@ -388,7 +388,7 @@ Uses exact source statistics to answer some aggregates without scanning data.
 
 An aggregate result can be derived directly from exact source statistics.
 
-<a id="physical-rule-3"></a>
+(physical-rule-3)=
 
 ### `join_selection`
 
@@ -398,7 +398,7 @@ Chooses join implementation, build side, and partition mode from statistics and 
 
 The plan contains joins whose implementation or side ordering can be improved.
 
-<a id="physical-rule-4"></a>
+(physical-rule-4)=
 
 ### `LimitedDistinctAggregation`
 
@@ -408,7 +408,7 @@ Pushes limit hints into grouped distinct-style aggregations when only a small re
 
 A grouped aggregation has no aggregate expressions or ordering requirements and a downstream limit means fewer groups are enough.
 
-<a id="physical-rule-5"></a>
+(physical-rule-5)=
 
 ### `FilterPushdown` (pre-optimization phase)
 
@@ -420,7 +420,7 @@ Pushes supported physical filters down toward data sources before distribution a
 
 The plan contains `FilterExec` nodes or parent operators that can pass filters to their children.
 
-<a id="physical-rule-6"></a>
+(physical-rule-6)=
 
 ### `EnforceDistribution`
 
@@ -430,7 +430,7 @@ Adds repartitioning only where needed to satisfy physical distribution requireme
 
 Operators require a specific input partitioning or can benefit from added parallelism.
 
-<a id="physical-rule-7"></a>
+(physical-rule-7)=
 
 ### `CombinePartialFinalAggregate`
 
@@ -440,7 +440,7 @@ Collapses adjacent partial and final aggregates when the distributed shape makes
 
 A partial aggregate feeds a matching final aggregate that can be combined safely.
 
-<a id="physical-rule-8"></a>
+(physical-rule-8)=
 
 ### `EnforceSorting`
 
@@ -450,7 +450,7 @@ Adds or removes local sorts to satisfy required input orderings.
 
 Operators depend on a particular local ordering.
 
-<a id="physical-rule-9"></a>
+(physical-rule-9)=
 
 ### `OptimizeAggregateOrder`
 
@@ -460,7 +460,7 @@ Updates aggregate expressions to use the best ordering once sort requirements ar
 
 Aggregate expressions can take advantage of input ordering chosen by earlier physical passes.
 
-<a id="physical-rule-10"></a>
+(physical-rule-10)=
 
 ### `WindowTopN`
 
@@ -470,7 +470,7 @@ Replaces eligible row-number window and filter patterns with per-partition TopK 
 
 A window plan computes `ROW_NUMBER` and a following filter keeps only the first `K` rows per partition.
 
-<a id="physical-rule-11"></a>
+(physical-rule-11)=
 
 ### `ProjectionPushdown` (early pass)
 
@@ -482,7 +482,7 @@ Pushes projections toward inputs before later physical rewrites add more limit a
 
 The plan carries columns that downstream operators do not need.
 
-<a id="physical-rule-12"></a>
+(physical-rule-12)=
 
 ### `OutputRequirements` (remove phase)
 
@@ -494,7 +494,7 @@ Removes the temporary output-requirement helper nodes after requirement-sensitiv
 
 The early distribution, sorting, and projection passes have finished using the helper nodes.
 
-<a id="physical-rule-13"></a>
+(physical-rule-13)=
 
 ### `LimitAggregation`
 
@@ -504,7 +504,7 @@ Passes a limit hint into eligible aggregations so they can keep fewer accumulato
 
 A fetched sort orders by a grouped key or MIN/MAX aggregate output and only top rows are needed.
 
-<a id="physical-rule-14"></a>
+(physical-rule-14)=
 
 ### `LimitPushPastWindows`
 
@@ -514,7 +514,7 @@ Pushes fetch limits through bounded window operators when doing so keeps the res
 
 A downstream limit is blocked by a bounded window operator but can still move lower safely.
 
-<a id="physical-rule-15"></a>
+(physical-rule-15)=
 
 ### `HashJoinBuffering`
 
@@ -524,7 +524,7 @@ Adds buffering on the probe side of hash joins so probing can start before build
 
 The plan contains hash joins and buffering can improve runtime overlap.
 
-<a id="physical-rule-16"></a>
+(physical-rule-16)=
 
 ### `LimitPushdown`
 
@@ -534,7 +534,7 @@ Moves physical limits into child operators or fetch-enabled variants to cut data
 
 A physical plan contains limit nodes or operators that can absorb a fetch.
 
-<a id="physical-rule-17"></a>
+(physical-rule-17)=
 
 ### `TopKRepartition`
 
@@ -544,7 +544,7 @@ Pushes TopK below hash repartition when the partition key is a prefix of the sor
 
 A fetched sort sits above hash repartition and the key relationship makes pre-shuffle TopK valid.
 
-<a id="physical-rule-18"></a>
+(physical-rule-18)=
 
 ### `ProjectionPushdown` (late pass)
 
@@ -556,7 +556,7 @@ Runs projection pushdown again after limit and TopK rewrites expose new pruning 
 
 Later physical passes created new removable columns or projection merge opportunities.
 
-<a id="physical-rule-19"></a>
+(physical-rule-19)=
 
 ### `PushdownSort`
 
@@ -566,7 +566,7 @@ Pushes sort requirements into data sources that can already return sorted output
 
 A required ordering can be satisfied directly by a scan or other source operator.
 
-<a id="physical-rule-20"></a>
+(physical-rule-20)=
 
 ### `EnsureCooperative`
 
@@ -576,7 +576,7 @@ Wraps non-cooperative plan parts so long-running tasks yield fairly.
 
 Some execution operators would otherwise not yield cooperatively.
 
-<a id="physical-rule-21"></a>
+(physical-rule-21)=
 
 ### `FilterPushdown(Post)` (post-optimization phase)
 
@@ -592,7 +592,7 @@ The plan contains dynamic filters or late filter opportunities that depend on fi
 
 - This late pass protects dynamic filter references that earlier rewrites could invalidate.
 
-<a id="physical-rule-22"></a>
+(physical-rule-22)=
 
 ### `SanityCheckPlan`
 
