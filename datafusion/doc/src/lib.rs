@@ -22,10 +22,12 @@
 )]
 #![cfg_attr(docsrs, feature(doc_cfg))]
 
+mod optimizer;
 mod udaf;
 mod udf;
 mod udwf;
 
+pub use optimizer::{OptimizerRuleDoc, render_optimizer_rule_docs};
 pub use udaf::aggregate_doc_sections;
 pub use udf::scalar_doc_sections;
 pub use udwf::window_doc_sections;

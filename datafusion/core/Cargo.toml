@@ -126,6 +126,7 @@ datafusion-datasource-avro = { workspace = true, optional = true }
 datafusion-datasource-csv = { workspace = true }
 datafusion-datasource-json = { workspace = true }
 datafusion-datasource-parquet = { workspace = true, optional = true }
+datafusion-doc = { workspace = true }
 datafusion-execution = { workspace = true }
 datafusion-expr = { workspace = true, default-features = false }
 datafusion-expr-common = { workspace = true }
@@ -163,7 +164,6 @@ async-trait = { workspace = true }
 criterion = { workspace = true, features = ["async_tokio", "async_futures"] }
 ctor = { workspace = true }
 dashmap = "6.1.0"
-datafusion-doc = { workspace = true }
 datafusion-functions-window-common = { workspace = true }
 datafusion-macros = { workspace = true }
 datafusion-physical-optimizer = { workspace = true }

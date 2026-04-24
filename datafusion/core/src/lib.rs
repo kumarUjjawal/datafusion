@@ -786,6 +786,9 @@ pub use parquet;
 #[cfg(feature = "avro")]
 pub use datafusion_datasource_avro::arrow_avro;
 
+#[cfg(test)]
+mod optimizer_rule_docs;
+
 // re-export DataFusion sub-crates at the top level. Use `pub use *`
 // so that the contents of the subcrates appears in rustdocs
 // for details, see https://github.com/apache/datafusion/issues/6648
@@ -1144,6 +1147,12 @@ doc_comment::doctest!(
 doc_comment::doctest!(
     "../../../docs/source/library-user-guide/index.md",
     library_user_guide_index
+);
+
+#[cfg(doctest)]
+doc_comment::doctest!(
+    "../../../docs/source/library-user-guide/optimizer-rules.md",
+    library_user_guide_optimizer_rules
 );
 
 #[cfg(doctest)]
