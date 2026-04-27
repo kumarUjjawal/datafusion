@@ -19,7 +19,7 @@
 name = "datafusion"
 description = "DataFusion is an in-memory query engine that uses Apache Arrow as the memory model"
 keywords = ["arrow", "query", "sql"]
-include = ["benches/*.rs", "src/**/*.rs", "Cargo.toml", "LICENSE.txt", "NOTICE.txt"]
+include = ["benches/*.rs", "src/**/*.md", "src/**/*.rs", "Cargo.toml", "LICENSE.txt", "NOTICE.txt"]
 readme = "../../README.md"
 version = { workspace = true }
 edition = { workspace = true }
@@ -126,7 +126,6 @@ datafusion-datasource-avro = { workspace = true, optional = true }
 datafusion-datasource-csv = { workspace = true }
 datafusion-datasource-json = { workspace = true }
 datafusion-datasource-parquet = { workspace = true, optional = true }
-datafusion-doc = { workspace = true }
 datafusion-execution = { workspace = true }
 datafusion-expr = { workspace = true, default-features = false }
 datafusion-expr-common = { workspace = true }
@@ -183,7 +182,7 @@ test-utils = { path = "../../test-utils" }
 tokio = { workspace = true, features = ["rt-multi-thread", "parking_lot", "fs"] }
 
 [package.metadata.cargo-machete]
-ignored = ["datafusion-doc", "datafusion-macros", "dashmap"]
+ignored = ["datafusion-macros", "dashmap"]
 
 [target.'cfg(not(target_os = "windows"))'.dev-dependencies]
 nix = { version = "0.31.1", features = ["fs"] }

@@ -148,7 +148,6 @@ To get started, see
    library-user-guide/extending-operators
    library-user-guide/profiling
    library-user-guide/query-optimizer
-   Optimizer Rules Reference <library-user-guide/optimizer-rules>
 
 .. .. _toc.contributor-guide:
 

@@ -29,7 +29,7 @@ contains an extensive set of [`OptimizerRule`]s and [`PhysicalOptimizerRule`]s t
 they execute more quickly while still computing the same result.
 
 For a reference list of the built-in analyzer, logical optimizer, and physical optimizer rules,
-see [Optimizer Rules Reference].
+see [Optimizer Rule Reference].
 
 For a deeper background on optimizer architecture and rule types and predicates, see
 [Optimizing SQL (and DataFrames) in DataFusion, Part 1], [Part 2],
@@ -42,7 +42,7 @@ For a deeper background on optimizer architecture and rule types and predicates,
 [part 2]: https://datafusion.apache.org/blog/2025/06/15/optimizing-sql-dataframes-part-two
 [using ordering for better plans in apache datafusion]: https://datafusion.apache.org/blog/2025/03/11/ordering-analysis
 [dynamic filters: passing information between operators during execution for 25x faster queries]: https://datafusion.apache.org/blog/2025/09/10/dynamic-filters
-[optimizer rules reference]: optimizer-rules.md
+[optimizer rule reference]: https://docs.rs/datafusion/latest/datafusion/index.html#built-in-optimizer-rules
 [`logicalplan`]: https://docs.rs/datafusion/latest/datafusion/logical_expr/enum.LogicalPlan.html
 
 ## Running the Optimizer
