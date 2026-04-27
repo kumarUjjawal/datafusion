@@ -21,7 +21,6 @@ mod required_indices;
 
 use crate::optimizer::ApplyOrder;
 use crate::{OptimizerConfig, OptimizerRule};
-use std::collections::HashSet;
 use std::sync::Arc;
 
 use datafusion_common::{
@@ -136,9 +135,11 @@ fn optimize_projections(
     // their parents' required indices.
     match plan {
         LogicalPlan::Projection(proj) => {
-            return merge_consecutive_projections(proj)?.transform_data(|proj| {
-                rewrite_projection_given_requirements(proj, config, &indices)
-            });
+            return merge_consecutive_projections(proj)?
+                .transform_data(|proj| {
+                    rewrite_projection_given_requirements(proj, config, &indices)
+                })?
+                .transform_data(|plan| optimize_subqueries(plan, config));
         }
         LogicalPlan::Aggregate(aggregate) => {
             // Split parent requirements to GROUP BY and aggregate sections:
@@ -147,26 +148,39 @@ fn optimize_projections(
             // `aggregate.aggr_expr`:
             let (group_by_reqs, aggregate_reqs) = indices.split_off(n_group_exprs);
 
-            // Get absolutely necessary GROUP BY fields:
-            let group_by_expr_existing = aggregate
-                .group_expr
-                .iter()
-                .map(|group_by_expr| group_by_expr.schema_name().to_string())
-                .collect::<Vec<_>>();
-
-            let new_group_bys = if let Some(simplest_groupby_indices) =
-                get_required_group_by_exprs_indices(
-                    aggregate.input.schema(),
-                    &group_by_expr_existing,
-                ) {
-                // Some of the fields in the GROUP BY may be required by the
-                // parent even if these fields are unnecessary in terms of
-                // functional dependency.
-                group_by_reqs
-                    .append(&simplest_groupby_indices)
-                    .get_at_indices(&aggregate.group_expr)
-            } else {
+            // Get absolutely necessary GROUP BY fields.
+            //
+            // When the input has no functional dependencies, we can
+            // short-circuit this analysis.
+            let new_group_bys = if aggregate
+                .input
+                .schema()
+                .functional_dependencies()
+                .is_empty()
+            {
                 aggregate.group_expr
+            } else {
+                let group_by_expr_existing = aggregate
+                    .group_expr
+                    .iter()
+                    .map(|group_by_expr| group_by_expr.schema_name().to_string())
+                    .collect::<Vec<_>>();
+
+                if let Some(simplest_groupby_indices) =
+                    get_required_group_by_exprs_indices(
+                        aggregate.input.schema(),
+                        &group_by_expr_existing,
+                    )
+                {
+                    // Some of the fields in the GROUP BY may be required by
+                    // the parent even if these fields are unnecessary in
+                    // terms of functional dependency.
+                    group_by_reqs
+                        .append(&simplest_groupby_indices)
+                        .get_at_indices(&aggregate.group_expr)
+                } else {
+                    aggregate.group_expr
+                }
             };
 
             // Only use the absolutely necessary aggregate expressions required
@@ -210,7 +224,8 @@ fn optimize_projections(
                     new_aggr_expr,
                 )
                 .map(LogicalPlan::Aggregate)
-            });
+            })?
+            .transform_data(|plan| optimize_subqueries(plan, config));
         }
         LogicalPlan::Window(window) => {
             let input_schema = Arc::clone(window.input.schema());
@@ -250,7 +265,8 @@ fn optimize_projections(
                         .map(LogicalPlan::Window)
                         .map(Transformed::yes)
                 }
-            });
+            })?
+            .transform_data(|plan| optimize_subqueries(plan, config));
         }
         LogicalPlan::TableScan(table_scan) => {
             let TableScan {
@@ -271,7 +287,8 @@ fn optimize_projections(
             let new_scan =
                 TableScan::try_new(table_name, source, Some(projection), filters, fetch)?;
 
-            return Ok(Transformed::yes(LogicalPlan::TableScan(new_scan)));
+            return Transformed::yes(LogicalPlan::TableScan(new_scan))
+                .transform_data(|plan| optimize_subqueries(plan, config));
         }
         // Other node types are handled below
         _ => {}
@@ -464,6 +481,9 @@ fn optimize_projections(
         )
     })?;
 
+    let transformed_plan =
+        transformed_plan.transform_data(|plan| optimize_subqueries(plan, config))?;
+
     // If any of the children are transformed, we need to potentially update the plan's schema
     if transformed_plan.transformed {
         transformed_plan.map_data(|plan| plan.recompute_schema())
@@ -472,8 +492,19 @@ fn optimize_projections(
     }
 }
 
-/// Merges consecutive projections.
-///
+/// Optimizes uncorrelated subquery plans embedded in expressions of the given
+/// plan node (e.g., `Expr::ScalarSubquery`). `map_children` only visits direct
+/// plan inputs, so subqueries must be handled separately.
+fn optimize_subqueries(
+    plan: LogicalPlan,
+    config: &dyn OptimizerConfig,
+) -> Result<Transformed<LogicalPlan>> {
+    plan.map_uncorrelated_subqueries(|subquery_plan| {
+        let indices = RequiredIndices::new_for_all_exprs(&subquery_plan);
+        optimize_projections(subquery_plan, config, indices)
+    })
+}
+
 /// Given a projection `proj`, this function attempts to merge it with a previous
 /// projection if it exists and if merging is beneficial. Merging is considered
 /// beneficial when expressions in the current projection are non-trivial and
@@ -680,56 +711,6 @@ fn rewrite_expr(expr: Expr, input: &Projection) -> Result<Transformed<Expr>> {
             _ => Ok(Transformed::no(expr)),
         }
     })
-}
-
-/// Accumulates outer-referenced columns by the
-/// given expression, `expr`.
-///
-/// # Parameters
-///
-/// * `expr` - The expression to analyze for outer-referenced columns.
-/// * `columns` - A mutable reference to a `HashSet<Column>` where detected
-///   columns are collected.
-fn outer_columns<'a>(expr: &'a Expr, columns: &mut HashSet<&'a Column>) {
-    // inspect_expr_pre doesn't handle subquery references, so find them explicitly
-    expr.apply(|expr| {
-        match expr {
-            Expr::OuterReferenceColumn(_, col) => {
-                columns.insert(col);
-            }
-            Expr::ScalarSubquery(subquery) => {
-                outer_columns_helper_multi(&subquery.outer_ref_columns, columns);
-            }
-            Expr::Exists(exists) => {
-                outer_columns_helper_multi(&exists.subquery.outer_ref_columns, columns);
-            }
-            Expr::InSubquery(insubquery) => {
-                outer_columns_helper_multi(
-                    &insubquery.subquery.outer_ref_columns,
-                    columns,
-                );
-            }
-            _ => {}
-        };
-        Ok(TreeNodeRecursion::Continue)
-    })
-    // unwrap: closure above never returns Err, so can not be Err here
-    .unwrap();
-}
-
-/// A recursive subroutine that accumulates outer-referenced columns by the
-/// given expressions (`exprs`).
-///
-/// # Parameters
-///
-/// * `exprs` - The expressions to analyze for outer-referenced columns.
-/// * `columns` - A mutable reference to a `HashSet<Column>` where detected
-///   columns are collected.
-fn outer_columns_helper_multi<'a, 'b>(
-    exprs: impl IntoIterator<Item = &'a Expr>,
-    columns: &'b mut HashSet<&'a Column>,
-) {
-    exprs.into_iter().for_each(|e| outer_columns(e, columns));
 }
 
 /// Splits requirement indices for a join into left and right children based on
