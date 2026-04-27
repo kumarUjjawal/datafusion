@@ -1264,7 +1264,10 @@ impl protobuf::PhysicalPlanNode {
                                     .with_ignore_nulls(agg_node.ignore_nulls)
                                     .with_distinct(agg_node.distinct)
                                     .order_by(order_bys)
-                                    .human_display(agg_node.human_display.clone());
+                                    .human_display(agg_node.human_display.clone())
+                                    .with_aliased_human_display(
+                                        agg_node.human_display_is_aliased,
+                                    );
                                     builder.build().map(Arc::new)
                                 }
                             })

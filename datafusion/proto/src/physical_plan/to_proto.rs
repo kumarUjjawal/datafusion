@@ -84,6 +84,7 @@ pub fn serialize_physical_aggr_expr(
                     .human_display()
                     .unwrap_or_default()
                     .to_string(),
+                human_display_is_aliased: aggr_expr.has_aliased_human_display(),
             },
         )),
     })

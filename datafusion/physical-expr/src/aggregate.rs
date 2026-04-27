@@ -67,6 +67,8 @@ pub struct AggregateExprBuilder {
     alias: Option<String>,
     /// A human readable name
     human_display: Option<String>,
+    /// Whether `human_display` includes an explicit `... as <alias>` suffix.
+    human_display_is_aliased: bool,
     /// Arrow Schema for the aggregate function
     schema: SchemaRef,
     /// The physical order by expressions
@@ -86,6 +88,7 @@ impl AggregateExprBuilder {
             args,
             alias: None,
             human_display: None,
+            human_display_is_aliased: false,
             schema: Arc::new(Schema::empty()),
             order_bys: vec![],
             ignore_nulls: false,
@@ -190,6 +193,7 @@ impl AggregateExprBuilder {
             args,
             alias,
             human_display,
+            human_display_is_aliased,
             schema,
             order_bys,
             ignore_nulls,
@@ -239,6 +243,7 @@ impl AggregateExprBuilder {
             return_field,
             name,
             human_display,
+            human_display_is_aliased,
             schema: Arc::unwrap_or_clone(schema),
             order_bys,
             ignore_nulls,
@@ -258,6 +263,12 @@ impl AggregateExprBuilder {
     pub fn human_display(mut self, name: impl Into<String>) -> Self {
         let name = name.into();
         self.human_display = (!name.is_empty()).then_some(name);
+        self
+    }
+
+    #[doc(hidden)]
+    pub fn with_aliased_human_display(mut self, human_display_is_aliased: bool) -> Self {
+        self.human_display_is_aliased = human_display_is_aliased;
         self
     }
 
@@ -317,6 +328,8 @@ pub struct AggregateFunctionExpr {
     name: String,
     /// Simplified name for `tree` explain.
     human_display: Option<String>,
+    /// Whether `human_display` includes an explicit `... as <alias>` suffix.
+    human_display_is_aliased: bool,
     schema: Schema,
     // The physical order by expressions
     order_bys: Vec<PhysicalSortExpr>,
@@ -350,6 +363,11 @@ impl AggregateFunctionExpr {
     /// Simplified name for `tree` explain.
     pub fn human_display(&self) -> Option<&str> {
         self.human_display.as_deref()
+    }
+
+    #[doc(hidden)]
+    pub fn has_aliased_human_display(&self) -> bool {
+        self.human_display_is_aliased
     }
 
     /// Return if the aggregation is distinct
@@ -462,6 +480,7 @@ impl AggregateFunctionExpr {
                 .order_by(self.order_bys.clone())
                 .schema(Arc::new(self.schema.clone()))
                 .alias(self.name().to_string())
+                .with_aliased_human_display(self.human_display_is_aliased)
                 .with_ignore_nulls(self.ignore_nulls)
                 .with_distinct(self.is_distinct)
                 .with_reversed(self.is_reversed);
@@ -586,15 +605,15 @@ impl AggregateFunctionExpr {
             ReversedUDAF::NotSupported => None,
             ReversedUDAF::Identical => Some(self.clone()),
             ReversedUDAF::Reversed(reverse_udf) => {
-                let aliased_human_display = self
-                    .human_display()
-                    .and_then(|human_display| {
-                        strip_alias_suffix(human_display, self.name())
-                    })
-                    .map(str::to_string);
-                let was_aliased = aliased_human_display.is_some();
+                let was_aliased = self.has_aliased_human_display();
                 let mut name = self.name().to_string();
                 let mut human_display = self.human_display().map(str::to_string);
+                // Reversing display follows two paths:
+                // - aliased display keeps the output `name` unchanged and rewrites only
+                //   the lowered expression in `human_display`, then re-attaches
+                //   `as <alias>`.
+                // - non-aliased display rewrites the canonical `name`, and rewrites
+                //   `human_display` only when present.
                 // If the function is changed, we need to reverse order_by clause as well
                 // i.e. First(a order by b asc null first) -> Last(a order by b desc null last)
                 if !was_aliased && self.fun().name() != reverse_udf.name() {
@@ -609,8 +628,19 @@ impl AggregateFunctionExpr {
                 }
 
                 if let Some(human_display) = human_display.as_mut() {
-                    if let Some(expr_display) = aliased_human_display {
-                        *human_display = expr_display;
+                    if was_aliased {
+                        let stripped = match strip_alias_suffix(
+                            human_display,
+                            self.name(),
+                        ) {
+                            Some(stripped) => stripped.to_string(),
+                            None => panic!(
+                                "invariant violated: aliased aggregate human_display must end with ` as {}`: {}",
+                                self.name(),
+                                human_display
+                            ),
+                        };
+                        *human_display = stripped;
                     }
 
                     if self.fun().name() != reverse_udf.name() {
@@ -632,6 +662,7 @@ impl AggregateFunctionExpr {
                         .order_by(self.order_bys.iter().map(|e| e.reverse()).collect())
                         .schema(Arc::new(self.schema.clone()))
                         .alias(name)
+                        .with_aliased_human_display(was_aliased)
                         .with_ignore_nulls(self.ignore_nulls)
                         .with_distinct(self.is_distinct)
                         .with_reversed(!self.is_reversed);
@@ -693,6 +724,7 @@ impl AggregateFunctionExpr {
             name: self.name.clone(),
             // TODO: Human name should be updated after re-write to not mislead
             human_display: self.human_display.clone(),
+            human_display_is_aliased: self.human_display_is_aliased,
             schema: self.schema.clone(),
             order_bys: new_order_bys,
             ignore_nulls: self.ignore_nulls,

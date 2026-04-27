@@ -2402,6 +2402,7 @@ pub fn create_aggregate_expr_with_name_and_maybe_filter(
     e: &Expr,
     name: Option<String>,
     human_display: Option<String>,
+    human_display_is_aliased: bool,
     logical_input_schema: &DFSchema,
     physical_input_schema: &Schema,
     execution_props: &ExecutionProps,
@@ -2450,6 +2451,7 @@ pub fn create_aggregate_expr_with_name_and_maybe_filter(
                         .order_by(order_bys.clone())
                         .schema(Arc::new(physical_input_schema.to_owned()))
                         .alias(name)
+                        .with_aliased_human_display(human_display_is_aliased)
                         .with_ignore_nulls(ignore_nulls)
                         .with_distinct(*distinct);
                 if let Some(human_display) = human_display {
@@ -2477,30 +2479,37 @@ pub fn create_aggregate_expr_and_maybe_filter(
     // Physical explain prefers the lowered aggregate form, so unwrap all alias
     // layers to recover the underlying aggregate function and then re-attach
     // only the visible output alias.
-    let (name, human_display, e) = match e {
+    let (name, human_display, human_display_is_aliased, e) = match e {
         Expr::Alias(alias) => {
             let unaliased = e.clone().unalias_nested().data;
             let human_display = unaliased.human_display().to_string();
-            let human_display = if human_display.is_empty() || human_display == alias.name
-            {
-                alias.name.clone()
-            } else {
-                format!("{human_display} as {}", alias.name)
-            };
-            (Some(alias.name.clone()), Some(human_display), unaliased)
+            let (human_display, human_display_is_aliased) =
+                if human_display.is_empty() || human_display == alias.name {
+                    (alias.name.clone(), false)
+                } else {
+                    (format!("{human_display} as {}", alias.name), true)
+                };
+            (
+                Some(alias.name.clone()),
+                Some(human_display),
+                human_display_is_aliased,
+                unaliased,
+            )
         }
         Expr::AggregateFunction(_) => (
             Some(e.schema_name().to_string()),
             Some(e.human_display().to_string()),
+            false,
             e.clone(),
         ),
-        _ => (None, None, e.clone()),
+        _ => (None, None, false, e.clone()),
     };
 
     create_aggregate_expr_with_name_and_maybe_filter(
         &e,
         name,
         human_display,
+        human_display_is_aliased,
         logical_input_schema,
         physical_input_schema,
         execution_props,

@@ -1834,11 +1834,6 @@ impl Expr {
         Expr::Alias(Alias::new(self, relation, name.into()).with_metadata(metadata))
     }
 
-    #[doc(hidden)]
-    pub fn alias_with_existing(self, alias: &Alias) -> Expr {
-        Expr::Alias(alias.clone().with_expr(self))
-    }
-
     /// Remove an alias from an expression if one exists.
     ///
     /// If the expression is not an alias, the expression is returned unchanged.

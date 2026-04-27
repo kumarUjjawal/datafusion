@@ -15648,6 +15648,9 @@ impl serde::Serialize for PhysicalAggregateExprNode {
         if !self.human_display.is_empty() {
             len += 1;
         }
+        if self.human_display_is_aliased {
+            len += 1;
+        }
         if self.aggregate_function.is_some() {
             len += 1;
         }
@@ -15671,6 +15674,9 @@ impl serde::Serialize for PhysicalAggregateExprNode {
         }
         if !self.human_display.is_empty() {
             struct_ser.serialize_field("humanDisplay", &self.human_display)?;
+        }
+        if self.human_display_is_aliased {
+            struct_ser.serialize_field("humanDisplayIsAliased", &self.human_display_is_aliased)?;
         }
         if let Some(v) = self.aggregate_function.as_ref() {
             match v {
@@ -15699,6 +15705,8 @@ impl<'de> serde::Deserialize<'de> for PhysicalAggregateExprNode {
             "funDefinition",
             "human_display",
             "humanDisplay",
+            "human_display_is_aliased",
+            "humanDisplayIsAliased",
             "user_defined_aggr_function",
             "userDefinedAggrFunction",
         ];
@@ -15711,6 +15719,7 @@ impl<'de> serde::Deserialize<'de> for PhysicalAggregateExprNode {
             IgnoreNulls,
             FunDefinition,
             HumanDisplay,
+            HumanDisplayIsAliased,
             UserDefinedAggrFunction,
         }
         impl<'de> serde::Deserialize<'de> for GeneratedField {
@@ -15739,6 +15748,7 @@ impl<'de> serde::Deserialize<'de> for PhysicalAggregateExprNode {
                             "ignoreNulls" | "ignore_nulls" => Ok(GeneratedField::IgnoreNulls),
                             "funDefinition" | "fun_definition" => Ok(GeneratedField::FunDefinition),
                             "humanDisplay" | "human_display" => Ok(GeneratedField::HumanDisplay),
+                            "humanDisplayIsAliased" | "human_display_is_aliased" => Ok(GeneratedField::HumanDisplayIsAliased),
                             "userDefinedAggrFunction" | "user_defined_aggr_function" => Ok(GeneratedField::UserDefinedAggrFunction),
                             _ => Err(serde::de::Error::unknown_field(value, FIELDS)),
                         }
@@ -15765,6 +15775,7 @@ impl<'de> serde::Deserialize<'de> for PhysicalAggregateExprNode {
                 let mut ignore_nulls__ = None;
                 let mut fun_definition__ = None;
                 let mut human_display__ = None;
+                let mut human_display_is_aliased__ = None;
                 let mut aggregate_function__ = None;
                 while let Some(k) = map_.next_key()? {
                     match k {
@@ -15806,6 +15817,12 @@ impl<'de> serde::Deserialize<'de> for PhysicalAggregateExprNode {
                             }
                             human_display__ = Some(map_.next_value()?);
                         }
+                        GeneratedField::HumanDisplayIsAliased => {
+                            if human_display_is_aliased__.is_some() {
+                                return Err(serde::de::Error::duplicate_field("humanDisplayIsAliased"));
+                            }
+                            human_display_is_aliased__ = Some(map_.next_value()?);
+                        }
                         GeneratedField::UserDefinedAggrFunction => {
                             if aggregate_function__.is_some() {
                                 return Err(serde::de::Error::duplicate_field("userDefinedAggrFunction"));
@@ -15821,6 +15838,7 @@ impl<'de> serde::Deserialize<'de> for PhysicalAggregateExprNode {
                     ignore_nulls: ignore_nulls__.unwrap_or_default(),
                     fun_definition: fun_definition__,
                     human_display: human_display__.unwrap_or_default(),
+                    human_display_is_aliased: human_display_is_aliased__.unwrap_or_default(),
                     aggregate_function: aggregate_function__,
                 })
             }

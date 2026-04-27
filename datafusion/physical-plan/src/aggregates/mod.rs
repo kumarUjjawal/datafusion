@@ -1447,7 +1447,7 @@ impl DisplayAs for AggregateExec {
 }
 
 fn format_aggregate_exec_expr(agg: &AggregateFunctionExpr) -> &str {
-    if has_aliased_human_display(agg) {
+    if agg.has_aliased_human_display() {
         agg.human_display().unwrap_or_else(|| agg.name())
     } else {
         agg.name()
@@ -1456,12 +1456,6 @@ fn format_aggregate_exec_expr(agg: &AggregateFunctionExpr) -> &str {
 
 fn format_tree_aggregate_expr(agg: &AggregateFunctionExpr) -> &str {
     agg.human_display().unwrap_or_else(|| agg.name())
-}
-
-fn has_aliased_human_display(agg: &AggregateFunctionExpr) -> bool {
-    agg.human_display()
-        .and_then(|human_display| human_display.strip_suffix(agg.name()))
-        .is_some_and(|prefix| prefix.ends_with(" as "))
 }
 
 impl ExecutionPlan for AggregateExec {
@@ -3053,6 +3047,7 @@ mod tests {
             .human_display(
                 "first_value(b) ORDER BY [b ASC NULLS LAST] as agg".to_string(),
             )
+            .with_aliased_human_display(true)
             .build()?;
 
         let reversed = agg.reverse_expr().expect("expected reverse expr");
@@ -3087,6 +3082,7 @@ mod tests {
             "first_value(first_value_col) ORDER BY [first_value_col ASC NULLS LAST] as agg"
                 .to_string(),
         )
+        .with_aliased_human_display(true)
         .build()?;
 
         let reversed = agg.reverse_expr().expect("expected reverse expr");
@@ -3117,6 +3113,29 @@ mod tests {
 
         assert_eq!(agg.human_display(), None);
         assert_eq!(format_tree_aggregate_expr(&agg), "agg");
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_reverse_expr_preserves_non_aliased_display_path() -> Result<()> {
+        let schema = create_test_schema()?;
+        let agg = AggregateExprBuilder::new(first_value_udaf(), vec![col("b", &schema)?])
+            .order_by(vec![PhysicalSortExpr {
+                expr: col("b", &schema)?,
+                options: SortOptions::new(false, false),
+            }])
+            .schema(Arc::clone(&schema))
+            .alias("first_value(b) ORDER BY [b ASC NULLS LAST]")
+            .build()?;
+
+        let reversed = agg.reverse_expr().expect("expected reverse expr");
+
+        assert_eq!(
+            reversed.name(),
+            "last_value(b) ORDER BY [b DESC NULLS FIRST]"
+        );
+        assert_eq!(reversed.human_display(), None);
 
         Ok(())
     }
