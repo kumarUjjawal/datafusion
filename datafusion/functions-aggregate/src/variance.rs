@@ -18,14 +18,23 @@
 //! [`VarianceSample`]: variance sample aggregations.
 //! [`VariancePopulation`]: variance population aggregations.
 
-use arrow::datatypes::{FieldRef, Float64Type};
+use arrow::datatypes::{
+    DECIMAL128_MAX_PRECISION, DECIMAL256_MAX_PRECISION, Decimal128Type, Decimal256Type,
+    FieldRef, Float64Type, i256,
+};
 use arrow::{
-    array::{Array, ArrayRef, BooleanArray, Float64Array, UInt64Array},
+    array::{
+        Array, ArrayRef, ArrowNativeTypeOp, AsArray, BooleanArray, Float64Array,
+        UInt64Array,
+    },
     buffer::NullBuffer,
     datatypes::{DataType, Field},
 };
-use datafusion_common::cast::{as_float64_array, as_uint64_array};
-use datafusion_common::{Result, ScalarValue};
+use datafusion_common::cast::{as_boolean_array, as_float64_array, as_uint64_array};
+use datafusion_common::types::NativeType;
+use datafusion_common::{
+    Result, ScalarValue, arrow_datafusion_err, exec_datafusion_err, plan_err,
+};
 use datafusion_expr::{
     Accumulator, AggregateUDFImpl, Documentation, GroupsAccumulator, Signature,
     Volatility,
@@ -37,6 +46,7 @@ use datafusion_functions_aggregate_common::{
     aggregate::groups_accumulator::accumulate::accumulate, stats::StatsType,
 };
 use datafusion_macros::user_doc;
+use num_traits::ToPrimitive;
 use std::mem::{size_of, size_of_val};
 use std::{fmt::Debug, sync::Arc};
 
@@ -78,7 +88,7 @@ impl VarianceSample {
     pub fn new() -> Self {
         Self {
             aliases: vec![String::from("var_sample"), String::from("var_samp")],
-            signature: Signature::exact(vec![DataType::Float64], Volatility::Immutable),
+            signature: stats_signature(),
         }
     }
 }
@@ -96,33 +106,37 @@ impl AggregateUDFImpl for VarianceSample {
         Ok(DataType::Float64)
     }
 
+    fn coerce_types(&self, arg_types: &[DataType]) -> Result<Vec<DataType>> {
+        stats_coerce_types(self.name(), arg_types)
+    }
+
     fn state_fields(&self, args: StateFieldsArgs) -> Result<Vec<FieldRef>> {
-        let name = args.name;
-        match args.is_distinct {
-            false => Ok(vec![
-                Field::new(format_state_name(name, "count"), DataType::UInt64, true),
-                Field::new(format_state_name(name, "mean"), DataType::Float64, true),
-                Field::new(format_state_name(name, "m2"), DataType::Float64, true),
-            ]
-            .into_iter()
-            .map(Arc::new)
-            .collect()),
-            true => {
-                let field = Field::new_list_field(DataType::Float64, true);
-                let state_name = "distinct_var";
-                Ok(vec![
-                    Field::new(
-                        format_state_name(name, state_name),
-                        DataType::List(Arc::new(field)),
-                        true,
-                    )
-                    .into(),
-                ])
-            }
-        }
+        Ok(variance_state_fields(
+            args.name,
+            args.input_fields[0].data_type(),
+            args.is_distinct,
+        ))
     }
 
     fn accumulator(&self, acc_args: AccumulatorArgs) -> Result<Box<dyn Accumulator>> {
+        if let DataType::Decimal128(precision, scale) =
+            acc_args.expr_fields[0].data_type()
+        {
+            if acc_args.is_distinct {
+                return Ok(Box::new(Decimal128DistinctVarianceAccumulator::new(
+                    StatsType::Sample,
+                    *precision,
+                    *scale,
+                )));
+            }
+
+            return Ok(Box::new(Decimal128VarianceAccumulator::new(
+                StatsType::Sample,
+                *precision,
+                *scale,
+            )));
+        }
+
         if acc_args.is_distinct {
             return Ok(Box::new(DistinctVarianceAccumulator::new(
                 StatsType::Sample,
@@ -137,13 +151,27 @@ impl AggregateUDFImpl for VarianceSample {
     }
 
     fn groups_accumulator_supported(&self, acc_args: AccumulatorArgs) -> bool {
+        // This relies on stats_coerce_types mapping supported inputs to one of
+        // these execution types before physical planning.
         !acc_args.is_distinct
+            && matches!(
+                acc_args.expr_fields[0].data_type(),
+                DataType::Float64 | DataType::Decimal128(_, _)
+            )
     }
 
     fn create_groups_accumulator(
         &self,
-        _args: AccumulatorArgs,
+        args: AccumulatorArgs,
     ) -> Result<Box<dyn GroupsAccumulator>> {
+        if let DataType::Decimal128(precision, scale) = args.expr_fields[0].data_type() {
+            return Ok(Box::new(Decimal128VarianceGroupsAccumulator::new(
+                StatsType::Sample,
+                *precision,
+                *scale,
+            )));
+        }
+
         Ok(Box::new(VarianceGroupsAccumulator::new(StatsType::Sample)))
     }
 
@@ -174,7 +202,7 @@ impl VariancePopulation {
     pub fn new() -> Self {
         Self {
             aliases: vec![String::from("var_population")],
-            signature: Signature::exact(vec![DataType::Float64], Volatility::Immutable),
+            signature: stats_signature(),
         }
     }
 }
@@ -192,35 +220,37 @@ impl AggregateUDFImpl for VariancePopulation {
         Ok(DataType::Float64)
     }
 
+    fn coerce_types(&self, arg_types: &[DataType]) -> Result<Vec<DataType>> {
+        stats_coerce_types(self.name(), arg_types)
+    }
+
     fn state_fields(&self, args: StateFieldsArgs) -> Result<Vec<FieldRef>> {
-        match args.is_distinct {
-            false => {
-                let name = args.name;
-                Ok(vec![
-                    Field::new(format_state_name(name, "count"), DataType::UInt64, true),
-                    Field::new(format_state_name(name, "mean"), DataType::Float64, true),
-                    Field::new(format_state_name(name, "m2"), DataType::Float64, true),
-                ]
-                .into_iter()
-                .map(Arc::new)
-                .collect())
-            }
-            true => {
-                let field = Field::new_list_field(DataType::Float64, true);
-                let state_name = "distinct_var";
-                Ok(vec![
-                    Field::new(
-                        format_state_name(args.name, state_name),
-                        DataType::List(Arc::new(field)),
-                        true,
-                    )
-                    .into(),
-                ])
-            }
-        }
+        Ok(variance_state_fields(
+            args.name,
+            args.input_fields[0].data_type(),
+            args.is_distinct,
+        ))
     }
 
     fn accumulator(&self, acc_args: AccumulatorArgs) -> Result<Box<dyn Accumulator>> {
+        if let DataType::Decimal128(precision, scale) =
+            acc_args.expr_fields[0].data_type()
+        {
+            if acc_args.is_distinct {
+                return Ok(Box::new(Decimal128DistinctVarianceAccumulator::new(
+                    StatsType::Population,
+                    *precision,
+                    *scale,
+                )));
+            }
+
+            return Ok(Box::new(Decimal128VarianceAccumulator::new(
+                StatsType::Population,
+                *precision,
+                *scale,
+            )));
+        }
+
         if acc_args.is_distinct {
             return Ok(Box::new(DistinctVarianceAccumulator::new(
                 StatsType::Population,
@@ -237,13 +267,27 @@ impl AggregateUDFImpl for VariancePopulation {
     }
 
     fn groups_accumulator_supported(&self, acc_args: AccumulatorArgs) -> bool {
+        // This relies on stats_coerce_types mapping supported inputs to one of
+        // these execution types before physical planning.
         !acc_args.is_distinct
+            && matches!(
+                acc_args.expr_fields[0].data_type(),
+                DataType::Float64 | DataType::Decimal128(_, _)
+            )
     }
 
     fn create_groups_accumulator(
         &self,
-        _args: AccumulatorArgs,
+        args: AccumulatorArgs,
     ) -> Result<Box<dyn GroupsAccumulator>> {
+        if let DataType::Decimal128(precision, scale) = args.expr_fields[0].data_type() {
+            return Ok(Box::new(Decimal128VarianceGroupsAccumulator::new(
+                StatsType::Population,
+                *precision,
+                *scale,
+            )));
+        }
+
         Ok(Box::new(VarianceGroupsAccumulator::new(
             StatsType::Population,
         )))
@@ -251,6 +295,433 @@ impl AggregateUDFImpl for VariancePopulation {
 
     fn documentation(&self) -> Option<&Documentation> {
         self.doc()
+    }
+}
+
+pub(crate) fn stats_signature() -> Signature {
+    Signature::user_defined(Volatility::Immutable)
+}
+
+pub(crate) fn stats_coerce_types(
+    func_name: &str,
+    arg_types: &[DataType],
+) -> Result<Vec<DataType>> {
+    if arg_types.len() != 1 {
+        return plan_err!(
+            "The function {func_name} expects 1 argument, but {} were provided",
+            arg_types.len()
+        );
+    }
+
+    coerce_stats_arg(func_name, &arg_types[0]).map(|data_type| vec![data_type])
+}
+
+fn coerce_stats_arg(func_name: &str, data_type: &DataType) -> Result<DataType> {
+    match data_type {
+        DataType::Null => Ok(DataType::Float64),
+        DataType::Decimal32(precision, scale)
+        | DataType::Decimal64(precision, scale)
+        | DataType::Decimal128(precision, scale)
+        | DataType::Decimal256(precision, scale)
+            if *precision <= DECIMAL128_MAX_PRECISION =>
+        {
+            Ok(DataType::Decimal128(*precision, *scale))
+        }
+        DataType::Decimal256(_, _) => Ok(DataType::Float64),
+        _ => {
+            let logical_type: NativeType = data_type.into();
+            if logical_type.is_integer() || logical_type.is_float() {
+                Ok(DataType::Float64)
+            } else {
+                plan_err!(
+                    "The function {func_name} expects Numeric but received {logical_type}"
+                )
+            }
+        }
+    }
+}
+
+pub(crate) fn variance_state_fields(
+    name: &str,
+    input_type: &DataType,
+    is_distinct: bool,
+) -> Vec<FieldRef> {
+    if is_distinct {
+        let value_type = match input_type {
+            DataType::Decimal128(precision, scale) => {
+                DataType::Decimal128(*precision, *scale)
+            }
+            _ => DataType::Float64,
+        };
+        let field = Field::new_list_field(value_type, true);
+        return vec![
+            Field::new(
+                format_state_name(name, "distinct_var"),
+                DataType::List(Arc::new(field)),
+                true,
+            )
+            .into(),
+        ];
+    }
+
+    match input_type {
+        DataType::Decimal128(_, scale) => vec![
+            Field::new(format_state_name(name, "count"), DataType::UInt64, true),
+            Field::new(
+                format_state_name(name, "sum"),
+                decimal_sum_type(*scale),
+                true,
+            ),
+            Field::new(
+                format_state_name(name, "sum_squares"),
+                decimal_sum_squares_type(*scale),
+                true,
+            ),
+            Field::new(format_state_name(name, "mean"), DataType::Float64, true),
+            Field::new(format_state_name(name, "m2"), DataType::Float64, true),
+            Field::new(format_state_name(name, "exact"), DataType::Boolean, true),
+        ]
+        .into_iter()
+        .map(Arc::new)
+        .collect(),
+        _ => vec![
+            Field::new(format_state_name(name, "count"), DataType::UInt64, true),
+            Field::new(format_state_name(name, "mean"), DataType::Float64, true),
+            Field::new(format_state_name(name, "m2"), DataType::Float64, true),
+        ]
+        .into_iter()
+        .map(Arc::new)
+        .collect(),
+    }
+}
+
+fn decimal_sum_type(scale: i8) -> DataType {
+    DataType::Decimal256(DECIMAL256_MAX_PRECISION, scale)
+}
+
+fn decimal_sum_squares_type(scale: i8) -> DataType {
+    DataType::Decimal256(DECIMAL256_MAX_PRECISION, scale * 2)
+}
+
+pub(crate) fn checked_add_decimal(lhs: i256, rhs: i256) -> Result<i256> {
+    lhs.add_checked(rhs).map_err(|e| arrow_datafusion_err!(e))
+}
+
+pub(crate) fn checked_sub_decimal(lhs: i256, rhs: i256) -> Result<i256> {
+    lhs.sub_checked(rhs).map_err(|e| arrow_datafusion_err!(e))
+}
+
+pub(crate) fn checked_mul_decimal(lhs: i256, rhs: i256) -> Result<i256> {
+    lhs.mul_checked(rhs).map_err(|e| arrow_datafusion_err!(e))
+}
+
+pub(crate) fn checked_add_count(lhs: u64, rhs: u64) -> Result<u64> {
+    lhs.checked_add(rhs).ok_or_else(|| {
+        exec_datafusion_err!("Arithmetic overflow in statistical aggregate count")
+    })
+}
+
+pub(crate) fn i256_to_f64(value: i256) -> Result<f64> {
+    value
+        .to_f64()
+        .ok_or_else(|| exec_datafusion_err!("Failed to convert Decimal256 to Float64"))
+}
+
+fn variance_divisor_count(count: u64, stats_type: StatsType) -> u64 {
+    match stats_type {
+        StatsType::Population => count,
+        StatsType::Sample => count.saturating_sub(1),
+    }
+}
+
+fn variance_from_m2(count: u64, m2: f64, stats_type: StatsType) -> Option<f64> {
+    match (count, stats_type) {
+        (0, _) => None,
+        (1, StatsType::Sample) => None,
+        (1, StatsType::Population) => Some(0.0),
+        _ => Some(normalize_decimal_stat(
+            m2 / variance_divisor_count(count, stats_type) as f64,
+        )),
+    }
+}
+
+fn decimal_to_f64(value: i128, scale_mul: f64) -> f64 {
+    value as f64 / scale_mul
+}
+
+fn checked_decimal_state(
+    sum: i256,
+    sum_squares: i256,
+    value: i256,
+) -> Result<(i256, i256)> {
+    let square = checked_mul_decimal(value, value)?;
+    Ok((
+        checked_add_decimal(sum, value)?,
+        checked_add_decimal(sum_squares, square)?,
+    ))
+}
+
+fn checked_decimal_state_retract(
+    sum: i256,
+    sum_squares: i256,
+    value: i256,
+) -> Result<(i256, i256)> {
+    let square = checked_mul_decimal(value, value)?;
+    Ok((
+        checked_sub_decimal(sum, value)?,
+        checked_sub_decimal(sum_squares, square)?,
+    ))
+}
+
+fn exact_decimal_variance_value(
+    count: u64,
+    divisor_count: u64,
+    sum: i256,
+    sum_squares: i256,
+    scale: i8,
+) -> Result<Option<f64>> {
+    let count_i256 = i256::from_i128(i128::from(count));
+    let numerator =
+        match checked_mul_decimal(sum_squares, count_i256).and_then(|sum_squares| {
+            checked_sub_decimal(sum_squares, checked_mul_decimal(sum, sum)?)
+        }) {
+            Ok(numerator) => numerator,
+            Err(_) => return Ok(None),
+        };
+
+    let scale_mul = 10_f64.powi(scale as i32);
+    let denominator = count as f64 * divisor_count as f64 * scale_mul * scale_mul;
+    Ok(Some(i256_to_f64(numerator)? / denominator))
+}
+
+pub(crate) fn normalize_decimal_stat(value: f64) -> f64 {
+    if value < 0.0 && value > -f64::EPSILON {
+        0.0
+    } else {
+        value
+    }
+}
+
+#[derive(Debug)]
+pub struct Decimal128VarianceAccumulator {
+    sum: i256,
+    sum_squares: i256,
+    mean: f64,
+    m2: f64,
+    count: u64,
+    scale: i8,
+    scale_mul: f64,
+    exact: bool,
+    stats_type: StatsType,
+}
+
+impl Decimal128VarianceAccumulator {
+    pub(crate) fn new(stats_type: StatsType, _precision: u8, scale: i8) -> Self {
+        Self {
+            sum: i256::ZERO,
+            sum_squares: i256::ZERO,
+            mean: 0.0,
+            m2: 0.0,
+            count: 0,
+            scale,
+            scale_mul: 10_f64.powi(scale as i32),
+            exact: true,
+            stats_type,
+        }
+    }
+
+    fn update_value(&mut self, value: i128) -> Result<()> {
+        checked_add_count(self.count, 1)?;
+        let value_f64 = decimal_to_f64(value, self.scale_mul);
+        (self.count, self.mean, self.m2) =
+            update(self.count, self.mean, self.m2, value_f64);
+
+        if self.exact {
+            let value = i256::from_i128(value);
+            match checked_decimal_state(self.sum, self.sum_squares, value) {
+                Ok((sum, sum_squares)) => {
+                    self.sum = sum;
+                    self.sum_squares = sum_squares;
+                }
+                Err(_) => self.exact = false,
+            }
+        }
+
+        Ok(())
+    }
+
+    fn retract_value(&mut self, value: i128) -> Result<()> {
+        if self.count == 0 {
+            return Err(exec_datafusion_err!(
+                "Cannot retract from empty variance accumulator"
+            ));
+        }
+
+        let value_f64 = decimal_to_f64(value, self.scale_mul);
+        if self.count == 1 {
+            self.count = 0;
+            self.mean = 0.0;
+            self.m2 = 0.0;
+        } else {
+            let new_count = self.count - 1;
+            let delta1 = self.mean - value_f64;
+            let new_mean = delta1 / new_count as f64 + self.mean;
+            let delta2 = new_mean - value_f64;
+            let new_m2 = self.m2 - delta1 * delta2;
+
+            self.count = new_count;
+            self.mean = new_mean;
+            self.m2 = new_m2;
+        }
+
+        if self.exact {
+            let value = i256::from_i128(value);
+            match checked_decimal_state_retract(self.sum, self.sum_squares, value) {
+                Ok((sum, sum_squares)) => {
+                    self.sum = sum;
+                    self.sum_squares = sum_squares;
+                }
+                Err(_) => self.exact = false,
+            }
+        }
+
+        Ok(())
+    }
+
+    fn evaluate_variance(&self) -> Result<Option<f64>> {
+        let divisor_count = variance_divisor_count(self.count, self.stats_type);
+        if divisor_count == 0 {
+            return Ok(variance_from_m2(self.count, self.m2, self.stats_type));
+        }
+
+        if self.exact
+            && let Some(variance) = exact_decimal_variance_value(
+                self.count,
+                divisor_count,
+                self.sum,
+                self.sum_squares,
+                self.scale,
+            )?
+        {
+            return Ok(Some(normalize_decimal_stat(variance)));
+        }
+
+        Ok(variance_from_m2(self.count, self.m2, self.stats_type))
+    }
+
+    fn merge_exact_state(
+        &mut self,
+        partial_sum: Option<i256>,
+        partial_sum_squares: Option<i256>,
+        partial_exact: bool,
+    ) {
+        if !self.exact || !partial_exact {
+            self.exact = false;
+            return;
+        }
+
+        let (Some(partial_sum), Some(partial_sum_squares)) =
+            (partial_sum, partial_sum_squares)
+        else {
+            self.exact = false;
+            return;
+        };
+
+        match checked_add_decimal(self.sum, partial_sum).and_then(|sum| {
+            checked_add_decimal(self.sum_squares, partial_sum_squares)
+                .map(|sum_squares| (sum, sum_squares))
+        }) {
+            Ok((sum, sum_squares)) => {
+                self.sum = sum;
+                self.sum_squares = sum_squares;
+            }
+            Err(_) => self.exact = false,
+        }
+    }
+}
+
+impl Accumulator for Decimal128VarianceAccumulator {
+    fn state(&mut self) -> Result<Vec<ScalarValue>> {
+        Ok(vec![
+            ScalarValue::from(self.count),
+            ScalarValue::Decimal256(
+                self.exact.then_some(self.sum),
+                DECIMAL256_MAX_PRECISION,
+                self.scale,
+            ),
+            ScalarValue::Decimal256(
+                self.exact.then_some(self.sum_squares),
+                DECIMAL256_MAX_PRECISION,
+                self.scale * 2,
+            ),
+            ScalarValue::from(self.mean),
+            ScalarValue::from(self.m2),
+            ScalarValue::Boolean(Some(self.exact)),
+        ])
+    }
+
+    fn update_batch(&mut self, values: &[ArrayRef]) -> Result<()> {
+        let arr = values[0].as_primitive::<Decimal128Type>();
+        for value in arr.iter().flatten() {
+            self.update_value(value)?;
+        }
+
+        Ok(())
+    }
+
+    fn retract_batch(&mut self, values: &[ArrayRef]) -> Result<()> {
+        let arr = values[0].as_primitive::<Decimal128Type>();
+        for value in arr.iter().flatten() {
+            self.retract_value(value)?;
+        }
+
+        Ok(())
+    }
+
+    fn merge_batch(&mut self, states: &[ArrayRef]) -> Result<()> {
+        let counts = as_uint64_array(&states[0])?;
+        let sums = states[1].as_primitive::<Decimal256Type>();
+        let sum_squares = states[2].as_primitive::<Decimal256Type>();
+        let means = as_float64_array(&states[3])?;
+        let m2s = as_float64_array(&states[4])?;
+        let exacts = as_boolean_array(&states[5])?;
+
+        for i in 0..counts.len() {
+            let count = counts.value(i);
+            if count == 0 {
+                continue;
+            }
+
+            checked_add_count(self.count, count)?;
+            (self.count, self.mean, self.m2) = merge(
+                self.count,
+                self.mean,
+                self.m2,
+                count,
+                means.value(i),
+                m2s.value(i),
+            );
+
+            self.merge_exact_state(
+                sums.is_valid(i).then(|| sums.value(i)),
+                sum_squares.is_valid(i).then(|| sum_squares.value(i)),
+                exacts.value(i),
+            );
+        }
+
+        Ok(())
+    }
+
+    fn evaluate(&mut self) -> Result<ScalarValue> {
+        Ok(ScalarValue::Float64(self.evaluate_variance()?))
+    }
+
+    fn size(&self) -> usize {
+        size_of_val(self)
+    }
+
+    fn supports_retract_batch(&self) -> bool {
+        true
     }
 }
 
@@ -583,6 +1054,269 @@ impl GroupsAccumulator for VarianceGroupsAccumulator {
 }
 
 #[derive(Debug)]
+pub struct Decimal128VarianceGroupsAccumulator {
+    sums: Vec<i256>,
+    sum_squares: Vec<i256>,
+    means: Vec<f64>,
+    m2s: Vec<f64>,
+    counts: Vec<u64>,
+    exact: Vec<bool>,
+    scale: i8,
+    scale_mul: f64,
+    stats_type: StatsType,
+}
+
+impl Decimal128VarianceGroupsAccumulator {
+    pub(crate) fn new(stats_type: StatsType, _precision: u8, scale: i8) -> Self {
+        Self {
+            sums: Vec::new(),
+            sum_squares: Vec::new(),
+            means: Vec::new(),
+            m2s: Vec::new(),
+            counts: Vec::new(),
+            exact: Vec::new(),
+            scale,
+            scale_mul: 10_f64.powi(scale as i32),
+            stats_type,
+        }
+    }
+
+    fn resize(&mut self, total_num_groups: usize) {
+        self.sums.resize(total_num_groups, i256::ZERO);
+        self.sum_squares.resize(total_num_groups, i256::ZERO);
+        self.means.resize(total_num_groups, 0.0);
+        self.m2s.resize(total_num_groups, 0.0);
+        self.counts.resize(total_num_groups, 0);
+        self.exact.resize(total_num_groups, true);
+    }
+
+    fn update_group(&mut self, group_index: usize, value: i128) -> Result<()> {
+        checked_add_count(self.counts[group_index], 1)?;
+
+        let value_f64 = decimal_to_f64(value, self.scale_mul);
+        let (count, mean, m2) = update(
+            self.counts[group_index],
+            self.means[group_index],
+            self.m2s[group_index],
+            value_f64,
+        );
+        self.counts[group_index] = count;
+        self.means[group_index] = mean;
+        self.m2s[group_index] = m2;
+
+        if self.exact[group_index] {
+            let value = i256::from_i128(value);
+            match checked_decimal_state(
+                self.sums[group_index],
+                self.sum_squares[group_index],
+                value,
+            ) {
+                Ok((sum, sum_squares)) => {
+                    self.sums[group_index] = sum;
+                    self.sum_squares[group_index] = sum_squares;
+                }
+                Err(_) => self.exact[group_index] = false,
+            }
+        }
+
+        Ok(())
+    }
+
+    fn exact_variance(
+        &self,
+        count: u64,
+        sum: i256,
+        sum_squares: i256,
+        exact: bool,
+    ) -> Result<Option<f64>> {
+        let divisor_count = variance_divisor_count(count, self.stats_type);
+        if !exact || divisor_count == 0 {
+            return Ok(None);
+        }
+
+        exact_decimal_variance_value(count, divisor_count, sum, sum_squares, self.scale)
+    }
+
+    pub(crate) fn variance(
+        &mut self,
+        emit_to: datafusion_expr::EmitTo,
+    ) -> Result<(Vec<f64>, NullBuffer)> {
+        let counts = emit_to.take_needed(&mut self.counts);
+        let sums = emit_to.take_needed(&mut self.sums);
+        let sum_squares = emit_to.take_needed(&mut self.sum_squares);
+        let means = emit_to.take_needed(&mut self.means);
+        let m2s = emit_to.take_needed(&mut self.m2s);
+        let exact = emit_to.take_needed(&mut self.exact);
+
+        let mut variances = Vec::with_capacity(counts.len());
+        let mut valid = Vec::with_capacity(counts.len());
+
+        for (((((count, sum), sum_square), _mean), m2), exact) in counts
+            .into_iter()
+            .zip(sums)
+            .zip(sum_squares)
+            .zip(means)
+            .zip(m2s)
+            .zip(exact)
+        {
+            let variance = self
+                .exact_variance(count, sum, sum_square, exact)?
+                .or_else(|| variance_from_m2(count, m2, self.stats_type));
+            valid.push(variance.is_some());
+            variances.push(variance.unwrap_or(0.0));
+        }
+
+        Ok((variances, NullBuffer::from_iter(valid)))
+    }
+
+    fn merge_exact_state(
+        &mut self,
+        group_index: usize,
+        partial_sum: Option<i256>,
+        partial_sum_squares: Option<i256>,
+        partial_exact: bool,
+    ) {
+        if !self.exact[group_index] || !partial_exact {
+            self.exact[group_index] = false;
+            return;
+        }
+
+        let (Some(partial_sum), Some(partial_sum_squares)) =
+            (partial_sum, partial_sum_squares)
+        else {
+            self.exact[group_index] = false;
+            return;
+        };
+
+        match checked_add_decimal(self.sums[group_index], partial_sum).and_then(|sum| {
+            checked_add_decimal(self.sum_squares[group_index], partial_sum_squares)
+                .map(|sum_squares| (sum, sum_squares))
+        }) {
+            Ok((sum, sum_squares)) => {
+                self.sums[group_index] = sum;
+                self.sum_squares[group_index] = sum_squares;
+            }
+            Err(_) => self.exact[group_index] = false,
+        }
+    }
+}
+
+impl GroupsAccumulator for Decimal128VarianceGroupsAccumulator {
+    fn update_batch(
+        &mut self,
+        values: &[ArrayRef],
+        group_indices: &[usize],
+        opt_filter: Option<&BooleanArray>,
+        total_num_groups: usize,
+    ) -> Result<()> {
+        assert_eq!(values.len(), 1, "single argument to update_batch");
+        let values = values[0].as_primitive::<Decimal128Type>();
+
+        self.resize(total_num_groups);
+        let mut result = Ok(());
+        accumulate(group_indices, values, opt_filter, |group_index, value| {
+            if result.is_ok() {
+                result = self.update_group(group_index, value);
+            }
+        });
+        result
+    }
+
+    fn merge_batch(
+        &mut self,
+        values: &[ArrayRef],
+        group_indices: &[usize],
+        _opt_filter: Option<&BooleanArray>,
+        total_num_groups: usize,
+    ) -> Result<()> {
+        assert_eq!(values.len(), 6, "six arguments to merge_batch");
+        let partial_counts = as_uint64_array(&values[0])?;
+        let partial_sums = values[1].as_primitive::<Decimal256Type>();
+        let partial_sum_squares = values[2].as_primitive::<Decimal256Type>();
+        let partial_means = as_float64_array(&values[3])?;
+        let partial_m2s = as_float64_array(&values[4])?;
+        let partial_exact = as_boolean_array(&values[5])?;
+
+        self.resize(total_num_groups);
+        for (idx, &group_index) in group_indices.iter().enumerate() {
+            let partial_count = partial_counts.value(idx);
+            if partial_count == 0 {
+                continue;
+            }
+
+            checked_add_count(self.counts[group_index], partial_count)?;
+            let (count, mean, m2) = merge(
+                self.counts[group_index],
+                self.means[group_index],
+                self.m2s[group_index],
+                partial_count,
+                partial_means.value(idx),
+                partial_m2s.value(idx),
+            );
+            self.counts[group_index] = count;
+            self.means[group_index] = mean;
+            self.m2s[group_index] = m2;
+
+            self.merge_exact_state(
+                group_index,
+                partial_sums.is_valid(idx).then(|| partial_sums.value(idx)),
+                partial_sum_squares
+                    .is_valid(idx)
+                    .then(|| partial_sum_squares.value(idx)),
+                partial_exact.value(idx),
+            );
+        }
+
+        Ok(())
+    }
+
+    fn evaluate(&mut self, emit_to: datafusion_expr::EmitTo) -> Result<ArrayRef> {
+        let (variances, nulls) = self.variance(emit_to)?;
+        Ok(Arc::new(Float64Array::new(variances.into(), Some(nulls))))
+    }
+
+    fn state(&mut self, emit_to: datafusion_expr::EmitTo) -> Result<Vec<ArrayRef>> {
+        let counts = emit_to.take_needed(&mut self.counts);
+        let sums = emit_to.take_needed(&mut self.sums);
+        let sum_squares = emit_to.take_needed(&mut self.sum_squares);
+        let means = emit_to.take_needed(&mut self.means);
+        let m2s = emit_to.take_needed(&mut self.m2s);
+        let exact = emit_to.take_needed(&mut self.exact);
+        let sum_nulls = NullBuffer::from_iter(exact.iter().copied());
+
+        Ok(vec![
+            Arc::new(UInt64Array::new(counts.into(), None)),
+            Arc::new(
+                arrow::array::PrimitiveArray::<Decimal256Type>::new(
+                    sums.into(),
+                    Some(sum_nulls.clone()),
+                )
+                .with_data_type(decimal_sum_type(self.scale)),
+            ),
+            Arc::new(
+                arrow::array::PrimitiveArray::<Decimal256Type>::new(
+                    sum_squares.into(),
+                    Some(sum_nulls),
+                )
+                .with_data_type(decimal_sum_squares_type(self.scale)),
+            ),
+            Arc::new(Float64Array::new(means.into(), None)),
+            Arc::new(Float64Array::new(m2s.into(), None)),
+            Arc::new(BooleanArray::from(exact)),
+        ])
+    }
+
+    fn size(&self) -> usize {
+        self.sums.capacity() * size_of::<i256>()
+            + self.sum_squares.capacity() * size_of::<i256>()
+            + self.means.capacity() * size_of::<f64>()
+            + self.m2s.capacity() * size_of::<f64>()
+            + self.counts.capacity() * size_of::<u64>()
+            + self.exact.capacity() * size_of::<bool>()
+    }
+}
+
+#[derive(Debug)]
 pub struct DistinctVarianceAccumulator {
     distinct_values: GenericDistinctBuffer<Float64Type>,
     stat_type: StatsType,
@@ -632,6 +1366,86 @@ impl Accumulator for DistinctVarianceAccumulator {
             },
             _ => Some(m2 / count as f64),
         }))
+    }
+
+    fn size(&self) -> usize {
+        size_of_val(self) + self.distinct_values.size()
+    }
+
+    fn state(&mut self) -> Result<Vec<ScalarValue>> {
+        self.distinct_values.state()
+    }
+
+    fn merge_batch(&mut self, states: &[ArrayRef]) -> Result<()> {
+        self.distinct_values.merge_batch(states)
+    }
+}
+
+#[derive(Debug)]
+pub struct Decimal128DistinctVarianceAccumulator {
+    distinct_values: GenericDistinctBuffer<Decimal128Type>,
+    stat_type: StatsType,
+    scale: i8,
+}
+
+impl Decimal128DistinctVarianceAccumulator {
+    pub fn new(stat_type: StatsType, precision: u8, scale: i8) -> Self {
+        Self {
+            distinct_values: GenericDistinctBuffer::<Decimal128Type>::new(
+                DataType::Decimal128(precision, scale),
+            ),
+            stat_type,
+            scale,
+        }
+    }
+}
+
+impl Accumulator for Decimal128DistinctVarianceAccumulator {
+    fn update_batch(&mut self, values: &[ArrayRef]) -> Result<()> {
+        self.distinct_values.update_batch(values)
+    }
+
+    fn evaluate(&mut self) -> Result<ScalarValue> {
+        let mut sum = i256::ZERO;
+        let mut sum_squares = i256::ZERO;
+        let mut mean = 0.0;
+        let mut m2 = 0.0;
+        let mut count = 0;
+        let mut exact = true;
+        let scale_mul = 10_f64.powi(self.scale as i32);
+
+        for value in self.distinct_values.values.iter().map(|v| v.0) {
+            let value_f64 = decimal_to_f64(value, scale_mul);
+            (count, mean, m2) = update(count, mean, m2, value_f64);
+
+            if exact {
+                let value = i256::from_i128(value);
+                match checked_decimal_state(sum, sum_squares, value) {
+                    Ok((new_sum, new_sum_squares)) => {
+                        sum = new_sum;
+                        sum_squares = new_sum_squares;
+                    }
+                    Err(_) => exact = false,
+                }
+            }
+        }
+
+        let divisor_count = variance_divisor_count(count, self.stat_type);
+        let variance = if exact && divisor_count != 0 {
+            exact_decimal_variance_value(
+                count,
+                divisor_count,
+                sum,
+                sum_squares,
+                self.scale,
+            )?
+            .map(normalize_decimal_stat)
+        } else {
+            None
+        }
+        .or_else(|| variance_from_m2(count, m2, self.stat_type));
+
+        Ok(ScalarValue::Float64(variance))
     }
 
     fn size(&self) -> usize {
