@@ -277,13 +277,12 @@ impl AggregateUDFImpl for StddevPop {
 }
 
 #[derive(Debug)]
-pub struct Decimal128StddevAccumulator {
+struct Decimal128StddevAccumulator {
     variance: Decimal128VarianceAccumulator,
 }
 
 impl Decimal128StddevAccumulator {
-    /// Creates a new `Decimal128StddevAccumulator`
-    pub fn try_new(s_type: StatsType, precision: u8, scale: i8) -> Result<Self> {
+    fn try_new(s_type: StatsType, precision: u8, scale: i8) -> Result<Self> {
         Ok(Self {
             variance: Decimal128VarianceAccumulator::new(s_type, precision, scale),
         })
@@ -384,12 +383,12 @@ impl Accumulator for StddevAccumulator {
 }
 
 #[derive(Debug)]
-pub struct Decimal128StddevGroupsAccumulator {
+struct Decimal128StddevGroupsAccumulator {
     variance: Decimal128VarianceGroupsAccumulator,
 }
 
 impl Decimal128StddevGroupsAccumulator {
-    pub fn new(s_type: StatsType, precision: u8, scale: i8) -> Self {
+    fn new(s_type: StatsType, precision: u8, scale: i8) -> Self {
         Self {
             variance: Decimal128VarianceGroupsAccumulator::new(s_type, precision, scale),
         }

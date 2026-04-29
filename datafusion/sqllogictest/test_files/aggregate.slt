@@ -3804,6 +3804,54 @@ select var_pop(a), stddev_pop(a), arrow_typeof(var_pop(a)) from (
 ----
 0 0 Float64
 
+# aggregate variance decimal128 fallback preserves local spread
+query R
+select var_pop(a) from (
+  values
+    ('99999999999999999999999999999999999999'::decimal(38, 0)),
+    ('99999999999999999999999999999999999998'::decimal(38, 0)),
+    ('99999999999999999999999999999999999997'::decimal(38, 0)),
+    ('99999999999999999999999999999999999996'::decimal(38, 0)),
+    ('99999999999999999999999999999999999995'::decimal(38, 0)),
+    ('99999999999999999999999999999999999994'::decimal(38, 0))
+) as t(a);
+----
+2.916666666667
+
+# aggregate variance decimal128 grouped overflow fallback
+query IR
+select g, var_pop(a) from (
+  values
+    (1, '99999999999999999999999999999999999999'::decimal(38, 0)),
+    (1, '99999999999999999999999999999999999998'::decimal(38, 0)),
+    (1, '99999999999999999999999999999999999997'::decimal(38, 0)),
+    (1, '99999999999999999999999999999999999996'::decimal(38, 0)),
+    (1, '99999999999999999999999999999999999995'::decimal(38, 0)),
+    (1, '99999999999999999999999999999999999994'::decimal(38, 0)),
+    (2, '1'::decimal(38, 0)),
+    (2, '2'::decimal(38, 0)),
+    (2, '3'::decimal(38, 0))
+) as t(g, a)
+group by g
+order by g;
+----
+1 2.916666666667
+2 0.666666666667
+
+# aggregate variance decimal128 distinct overflow fallback
+query R
+select var_pop(distinct a) from (
+  values
+    ('99999999999999999999999999999999999999'::decimal(38, 0)),
+    ('99999999999999999999999999999999999998'::decimal(38, 0)),
+    ('99999999999999999999999999999999999997'::decimal(38, 0)),
+    ('99999999999999999999999999999999999996'::decimal(38, 0)),
+    ('99999999999999999999999999999999999995'::decimal(38, 0)),
+    ('99999999999999999999999999999999999994'::decimal(38, 0))
+) as t(a);
+----
+2.916666666667
+
 # aggregate variance decimal256 falls back to float64
 query RT
 select var(a), arrow_typeof(var(a)) from (
