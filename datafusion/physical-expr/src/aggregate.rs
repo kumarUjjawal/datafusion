@@ -227,6 +227,20 @@ impl AggregateExprBuilder {
             Some(alias) => alias,
         };
 
+        if human_display_is_aliased {
+            let Some(display) = human_display.as_deref() else {
+                return internal_err!(
+                    "AggregateExprBuilder::human_display must be provided when human_display_is_aliased is true"
+                );
+            };
+
+            if strip_alias_suffix(display, &name).is_none() {
+                return internal_err!(
+                    "aliased aggregate human_display must end with ` as {name}`: {display}"
+                );
+            }
+        }
+
         let arg_fields = args
             .iter()
             .map(|e| e.return_field(schema.as_ref()))
@@ -582,23 +596,61 @@ impl AggregateFunctionExpr {
             ReversedUDAF::NotSupported => None,
             ReversedUDAF::Identical => Some(self.clone()),
             ReversedUDAF::Reversed(reverse_udf) => {
+                let was_aliased = self.has_aliased_human_display();
                 let mut name = self.name().to_string();
+                let mut human_display = self.human_display().map(str::to_string);
+                // Reversing display follows two paths:
+                // - aliased display keeps the output `name` unchanged and rewrites only
+                //   the lowered expression in `human_display`, then re-attaches
+                //   `as <alias>`.
+                // - non-aliased display rewrites the canonical `name`, and rewrites
+                //   `human_display` only when present.
                 // If the function is changed, we need to reverse order_by clause as well
                 // i.e. First(a order by b asc null first) -> Last(a order by b desc null last)
-                if self.fun().name() != reverse_udf.name() {
+                if !was_aliased && self.fun().name() != reverse_udf.name() {
                     replace_order_by_clause(&mut name);
                 }
-                replace_fn_name_clause(&mut name, self.fun.name(), reverse_udf.name());
+                if !was_aliased {
+                    replace_fn_name_clause(
+                        &mut name,
+                        self.fun.name(),
+                        reverse_udf.name(),
+                    );
+                }
 
-                AggregateExprBuilder::new(reverse_udf, self.args.to_vec())
-                    .order_by(self.order_bys.iter().map(|e| e.reverse()).collect())
-                    .schema(Arc::new(self.schema.clone()))
-                    .alias(name)
-                    .with_ignore_nulls(self.ignore_nulls)
-                    .with_distinct(self.is_distinct)
-                    .with_reversed(!self.is_reversed)
-                    .build()
-                    .ok()
+                if let Some(human_display) = human_display.as_mut() {
+                    if was_aliased {
+                        *human_display =
+                            strip_alias_suffix(human_display, self.name())?.to_string();
+                    }
+
+                    if self.fun().name() != reverse_udf.name() {
+                        replace_order_by_clause(human_display);
+                    }
+                    replace_fn_name_clause(
+                        human_display,
+                        self.fun.name(),
+                        reverse_udf.name(),
+                    );
+
+                    if was_aliased {
+                        *human_display = format!("{human_display} as {}", self.name());
+                    }
+                }
+
+                let mut builder =
+                    AggregateExprBuilder::new(reverse_udf, self.args.to_vec())
+                        .order_by(self.order_bys.iter().map(|e| e.reverse()).collect())
+                        .schema(Arc::new(self.schema.clone()))
+                        .alias(name)
+                        .with_aliased_human_display(was_aliased)
+                        .with_ignore_nulls(self.ignore_nulls)
+                        .with_distinct(self.is_distinct)
+                        .with_reversed(!self.is_reversed);
+                if let Some(human_display) = human_display {
+                    builder = builder.human_display(human_display);
+                }
+                builder.build().ok()
             }
         }
     }

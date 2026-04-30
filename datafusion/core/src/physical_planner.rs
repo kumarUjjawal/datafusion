@@ -2472,10 +2472,13 @@ pub fn create_window_expr(
 ) -> Result<Arc<dyn WindowExpr>> {
     // unpack aliased logical expressions, e.g. "sum(col) over () as total"
     let (name, e) = match e {
-        Expr::Alias(Alias { expr, name, .. }) => (name.clone(), expr.as_ref()),
-        _ => (e.schema_name().to_string(), e),
+        Expr::Alias(alias) => (
+            alias.name.clone(),
+            alias.expr.as_ref().clone().unalias_nested().data,
+        ),
+        _ => (e.schema_name().to_string(), e.clone()),
     };
-    create_window_expr_with_name(e, name, logical_schema, execution_props)
+    create_window_expr_with_name(&e, name, logical_schema, execution_props)
 }
 
 type AggregateExprWithOptionalArgs = (
@@ -3223,6 +3226,7 @@ impl<'n> TreeNodeVisitor<'n> for InvariantChecker {
 mod tests {
     use std::cmp::Ordering;
     use std::fmt::{self, Debug};
+    use std::mem::size_of_val;
     use std::ops::{BitAnd, Not};
 
     use super::*;
@@ -3238,18 +3242,22 @@ mod tests {
     use crate::execution::session_state::SessionStateBuilder;
     use arrow::array::{ArrayRef, DictionaryArray, Int32Array};
     use arrow::datatypes::{DataType, Field, Int32Type};
-    use arrow_schema::SchemaRef;
+    use arrow_schema::{FieldRef, SchemaRef};
     use datafusion_common::config::ConfigOptions;
     use datafusion_common::{
-        DFSchemaRef, TableReference, ToDFSchema as _, assert_batches_eq, assert_contains,
+        DFSchemaRef, ScalarValue, TableReference, ToDFSchema as _,
+        assert_batches_eq, assert_contains,
     };
     use datafusion_execution::TaskContext;
     use datafusion_execution::runtime_env::RuntimeEnv;
     use datafusion_expr::builder::subquery_alias;
+    use datafusion_expr::function::{AccumulatorArgs, StateFieldsArgs};
     use datafusion_expr::{
-        LogicalPlanBuilder, TableSource, UserDefinedLogicalNodeCore, col, lit,
+        Accumulator, AggregateUDF, AggregateUDFImpl, ExprFunctionExt,
+        LogicalPlanBuilder, Signature, TableSource, UserDefinedLogicalNodeCore,
+        Volatility, WindowFunctionDefinition, col, lit,
     };
-    use datafusion_functions_aggregate::count::count_all;
+    use datafusion_functions_aggregate::count::{count_all, count_udaf};
     use datafusion_functions_aggregate::expr_fn::sum;
     use datafusion_physical_expr::EquivalenceProperties;
     use datafusion_physical_plan::execution_plan::{Boundedness, EmissionType};
@@ -3273,6 +3281,112 @@ mod tests {
         planner
             .create_physical_plan(&logical_plan, &session_state)
             .await
+    }
+
+    async fn aggregate_explain(logical_plan: &LogicalPlan) -> Result<String> {
+        let physical_plan = plan(logical_plan).await?;
+        Ok(displayable(physical_plan.as_ref()).indent(true).to_string())
+    }
+
+    #[test]
+    fn test_create_window_expr_unwraps_alias_with_metadata() -> Result<()> {
+        use std::collections::HashMap;
+
+        use datafusion_common::metadata::FieldMetadata;
+
+        let schema = Arc::new(Schema::new(vec![Field::new(
+            "column1",
+            DataType::Int64,
+            true,
+        )]));
+        let logical_schema = schema.as_ref().clone().to_dfschema_ref()?;
+        let metadata = FieldMetadata::from(HashMap::from([(
+            "some_key".to_string(),
+            "some_value".to_string(),
+        )]));
+        let expr = Expr::from(WindowFunction::new(
+            WindowFunctionDefinition::AggregateUDF(count_udaf()),
+            vec![col("column1")],
+        ))
+        .alias_with_metadata("window_alias", Some(metadata));
+
+        let window_expr =
+            create_window_expr(&expr, &logical_schema, &ExecutionProps::new())?;
+
+        assert_eq!(window_expr.name(), "window_alias");
+        Ok(())
+    }
+
+    #[derive(Debug, Default)]
+    struct NullAccumulator;
+
+    impl Accumulator for NullAccumulator {
+        fn state(&mut self) -> Result<Vec<ScalarValue>> {
+            Ok(vec![self.evaluate()?])
+        }
+
+        fn update_batch(&mut self, _values: &[ArrayRef]) -> Result<()> {
+            Ok(())
+        }
+
+        fn merge_batch(&mut self, _states: &[ArrayRef]) -> Result<()> {
+            Ok(())
+        }
+
+        fn evaluate(&mut self) -> Result<ScalarValue> {
+            Ok(ScalarValue::Int64(None))
+        }
+
+        fn size(&self) -> usize {
+            size_of_val(self)
+        }
+    }
+
+    #[derive(Debug, Clone, PartialEq, Eq, Hash)]
+    struct CustomHumanDisplayUdaf {
+        signature: Signature,
+    }
+
+    impl CustomHumanDisplayUdaf {
+        fn new() -> Self {
+            Self {
+                signature: Signature::exact(vec![DataType::Int64], Volatility::Immutable),
+            }
+        }
+    }
+
+    impl AggregateUDFImpl for CustomHumanDisplayUdaf {
+        fn name(&self) -> &str {
+            "custom_human_display_udaf"
+        }
+
+        fn signature(&self) -> &Signature {
+            &self.signature
+        }
+
+        fn return_type(&self, _arg_types: &[DataType]) -> Result<DataType> {
+            Ok(DataType::Int64)
+        }
+
+        fn accumulator(
+            &self,
+            _acc_args: AccumulatorArgs,
+        ) -> Result<Box<dyn Accumulator>> {
+            Ok(Box::new(NullAccumulator))
+        }
+
+        fn state_fields(&self, _args: StateFieldsArgs) -> Result<Vec<FieldRef>> {
+            Ok(vec![
+                Field::new("custom_state", DataType::Int64, true).into(),
+            ])
+        }
+
+        fn human_display(&self, params: &AggregateFunctionParams) -> Result<String> {
+            Ok(format!(
+                "custom_display({})",
+                params.args[0].human_display()
+            ))
+        }
     }
 
     async fn plan_sql(query: &str) -> Result<Arc<dyn ExecutionPlan>> {

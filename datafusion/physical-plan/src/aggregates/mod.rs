@@ -3022,6 +3022,137 @@ mod tests {
             .map(Arc::new)
     }
 
+    #[test]
+    fn test_reverse_expr_preserves_aliased_human_display() -> Result<()> {
+        let schema = create_test_schema()?;
+        let agg = AggregateExprBuilder::new(first_value_udaf(), vec![col("b", &schema)?])
+            .order_by(vec![PhysicalSortExpr {
+                expr: col("b", &schema)?,
+                options: SortOptions::new(false, false),
+            }])
+            .schema(Arc::clone(&schema))
+            .alias("agg")
+            .human_display(
+                "first_value(b) ORDER BY [b ASC NULLS LAST] as agg".to_string(),
+            )
+            .with_aliased_human_display(true)
+            .build()?;
+
+        let reversed = agg.reverse_expr().expect("expected reverse expr");
+
+        assert_eq!(reversed.name(), "agg");
+        assert_eq!(
+            reversed.human_display(),
+            Some("last_value(b) ORDER BY [b DESC NULLS FIRST] as agg")
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_reverse_expr_does_not_rewrite_column_names_in_human_display() -> Result<()> {
+        let schema = Arc::new(Schema::new(vec![Field::new(
+            "first_value_col",
+            DataType::Int32,
+            true,
+        )]));
+        let agg = AggregateExprBuilder::new(
+            first_value_udaf(),
+            vec![col("first_value_col", &schema)?],
+        )
+        .order_by(vec![PhysicalSortExpr {
+            expr: col("first_value_col", &schema)?,
+            options: SortOptions::new(false, false),
+        }])
+        .schema(Arc::clone(&schema))
+        .alias("agg")
+        .human_display(
+            "first_value(first_value_col) ORDER BY [first_value_col ASC NULLS LAST] as agg"
+                .to_string(),
+        )
+        .with_aliased_human_display(true)
+        .build()?;
+
+        let reversed = agg.reverse_expr().expect("expected reverse expr");
+
+        assert_eq!(reversed.name(), "agg");
+        assert_eq!(
+            reversed.human_display(),
+            Some(
+                "last_value(first_value_col) ORDER BY [first_value_col DESC NULLS FIRST] as agg"
+            )
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_empty_human_display_is_treated_as_absent() -> Result<()> {
+        let schema = create_test_schema()?;
+        let agg = AggregateExprBuilder::new(first_value_udaf(), vec![col("b", &schema)?])
+            .order_by(vec![PhysicalSortExpr {
+                expr: col("b", &schema)?,
+                options: SortOptions::new(false, false),
+            }])
+            .schema(Arc::clone(&schema))
+            .alias("agg")
+            .human_display("")
+            .build()?;
+
+        assert_eq!(agg.human_display(), None);
+        assert_eq!(format_tree_aggregate_expr(&agg), "agg");
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_aliased_human_display_requires_alias_suffix() -> Result<()> {
+        let schema = create_test_schema()?;
+        let error =
+            AggregateExprBuilder::new(first_value_udaf(), vec![col("b", &schema)?])
+                .order_by(vec![PhysicalSortExpr {
+                    expr: col("b", &schema)?,
+                    options: SortOptions::new(false, false),
+                }])
+                .schema(Arc::clone(&schema))
+                .alias("agg")
+                .human_display("first_value(b) ORDER BY [b ASC NULLS LAST]")
+                .with_aliased_human_display(true)
+                .build()
+                .unwrap_err();
+
+        assert!(
+            error
+                .to_string()
+                .contains("aliased aggregate human_display must end with")
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_reverse_expr_preserves_non_aliased_display_path() -> Result<()> {
+        let schema = create_test_schema()?;
+        let agg = AggregateExprBuilder::new(first_value_udaf(), vec![col("b", &schema)?])
+            .order_by(vec![PhysicalSortExpr {
+                expr: col("b", &schema)?,
+                options: SortOptions::new(false, false),
+            }])
+            .schema(Arc::clone(&schema))
+            .alias("first_value(b) ORDER BY [b ASC NULLS LAST]")
+            .build()?;
+
+        let reversed = agg.reverse_expr().expect("expected reverse expr");
+
+        assert_eq!(
+            reversed.name(),
+            "last_value(b) ORDER BY [b DESC NULLS FIRST]"
+        );
+        assert_eq!(reversed.human_display(), None);
+
+        Ok(())
+    }
+
     // This function constructs the physical plan below,
     //
     // "AggregateExec: mode=Final, gby=[a@0 as a], aggr=[FIRST_VALUE(b)]",
