@@ -97,12 +97,7 @@ impl ParseUrl {
                     "PATH" => Some(path.to_string()),
                     "QUERY" => match key {
                         None => query.map(String::from),
-                        Some(key) => query.and_then(|q| {
-                            q.split('&')
-                                .filter_map(|pair| pair.split_once('='))
-                                .find(|(k, _)| *k == key)
-                                .map(|(_, v)| v.to_string())
-                        }),
+                        Some(key) => Self::query_value(query, key).map(String::from),
                     },
                     "REF" => fragment.map(String::from),
                     "FILE" => {
@@ -122,21 +117,17 @@ impl ParseUrl {
             .map(|url| match part {
                 "HOST" => url.host_str().map(String::from),
                 "PATH" => {
-                    let path: String = url.path().to_string();
-                    let path: String = if path == "/" { "".to_string() } else { path };
-                    Some(path)
+                    let path = Self::path(value, &url);
+                    Some(path.to_string())
                 }
                 "QUERY" => match key {
                     None => url.query().map(String::from),
-                    Some(key) => url
-                        .query_pairs()
-                        .find(|(k, _)| k == key)
-                        .map(|(_, v)| v.into_owned()),
+                    Some(key) => Self::query_value(url.query(), key).map(String::from),
                 },
                 "REF" => url.fragment().map(String::from),
                 "PROTOCOL" => Some(url.scheme().to_string()),
                 "FILE" => {
-                    let path = Self::file_path(value, &url);
+                    let path = Self::path(value, &url);
                     match url.query() {
                         Some(query) => Some(format!("{path}?{query}")),
                         None => Some(path.to_string()),
@@ -157,7 +148,7 @@ impl ParseUrl {
             })
     }
 
-    fn file_path<'a>(value: &str, url: &'a Url) -> &'a str {
+    fn path<'a>(value: &str, url: &'a Url) -> &'a str {
         let path = url.path();
         if path == "/" && Self::absolute_url_has_empty_path(value) {
             ""
@@ -175,6 +166,16 @@ impl ParseUrl {
             None => true,
             Some(index) => matches!(after_authority.as_bytes()[index], b'?' | b'#'),
         }
+    }
+
+    fn query_value<'a>(query: Option<&'a str>, key: &str) -> Option<&'a str> {
+        query.and_then(|query| {
+            query
+                .split('&')
+                .filter_map(|pair| pair.split_once('='))
+                .find(|(query_key, _)| *query_key == key)
+                .map(|(_, value)| value)
+        })
     }
 }
 
@@ -402,9 +403,49 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_path_root_is_empty_string() -> Result<()> {
-        let got = ParseUrl::parse("https://example.com/", "PATH", None)?;
-        assert_eq!(got, Some("".to_string()));
+    fn test_parse_path_empty_vs_root() -> Result<()> {
+        assert_eq!(
+            ParseUrl::parse("https://example.com", "PATH", None)?,
+            Some("".to_string())
+        );
+        assert_eq!(
+            ParseUrl::parse("https://example.com/", "PATH", None)?,
+            Some("/".to_string())
+        );
+        assert_eq!(
+            ParseUrl::parse("https://ex.com/dir%20/pa%20th.HTML", "PATH", None)?,
+            Some("/dir%20/pa%20th.HTML".to_string())
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn test_parse_query_key_is_raw() -> Result<()> {
+        let url = "https://use%20r:pas%20s@example.com/dir%20/pa%20th.HTML?query=x%20y&q2=2#Ref%20two";
+        assert_eq!(
+            ParseUrl::parse(url, "QUERY", None)?,
+            Some("query=x%20y&q2=2".to_string())
+        );
+        assert_eq!(
+            ParseUrl::parse(url, "QUERY", Some("query"))?,
+            Some("x%20y".to_string())
+        );
+        assert_eq!(
+            ParseUrl::parse("http://ex.com?key=", "QUERY", Some("key"))?,
+            Some("".to_string())
+        );
+        assert_eq!(
+            ParseUrl::parse("http://ex.com?keyonly", "QUERY", Some("keyonly"))?,
+            None
+        );
+        assert_eq!(
+            ParseUrl::parse("http://ex.com?a=1&a=2", "QUERY", Some("a"))?,
+            Some("1".to_string())
+        );
+        assert_eq!(
+            ParseUrl::parse("http://ex.com?a%20b=1", "QUERY", Some("a b"))?,
+            None
+        );
         Ok(())
     }
 
@@ -426,6 +467,14 @@ mod tests {
         assert_eq!(
             ParseUrl::parse("http://example.com/?foo=bar", "FILE", None)?,
             Some("/?foo=bar".to_string())
+        );
+        assert_eq!(
+            ParseUrl::parse("http://ex.com/?", "FILE", None)?,
+            Some("/?".to_string())
+        );
+        assert_eq!(
+            ParseUrl::parse("http://ex.com?", "FILE", None)?,
+            Some("?".to_string())
         );
         Ok(())
     }
@@ -524,7 +573,7 @@ mod tests {
 
         assert_eq!(out_sa.len(), 2);
         assert_eq!(out_sa.value(0), "example.com");
-        assert_eq!(out_sa.value(1), "");
+        assert_eq!(out_sa.value(1), "/");
         Ok(())
     }
 
