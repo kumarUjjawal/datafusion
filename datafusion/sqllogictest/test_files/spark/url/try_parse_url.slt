@@ -187,6 +187,36 @@ SELECT try_parse_url('https://example.com', 'PATH');
 (empty)
 
 query T
+SELECT try_parse_url('', 'PATH');
+----
+(empty)
+
+query T
+SELECT try_parse_url('http://example.com', 'FILE');
+----
+(empty)
+
+query T
+SELECT try_parse_url('http://example.com/', 'FILE');
+----
+/
+
+query T
+SELECT try_parse_url('http://example.com?foo=bar', 'FILE');
+----
+?foo=bar
+
+query T
+SELECT try_parse_url('http://example.com#fragment', 'FILE');
+----
+(empty)
+
+query T
+SELECT try_parse_url('http://example.com/?foo=bar', 'FILE');
+----
+/?foo=bar
+
+query T
 SELECT try_parse_url('https://example.com', 'path');
 ----
 NULL

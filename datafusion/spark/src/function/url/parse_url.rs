@@ -77,7 +77,7 @@ impl ParseUrl {
     /// # Returns
     ///
     /// * `Ok(Some(String))` - The extracted URL component as a string
-    /// * `Ok(None)` - If the requested component doesn't exist or is empty
+    /// * `Ok(None)` - If the requested component doesn't exist
     /// * `Err(DataFusionError)` - If the URL is malformed and cannot be parsed
     fn parse(value: &str, part: &str, key: Option<&str>) -> Result<Option<String>> {
         let url: std::result::Result<Url, ParseError> = Url::parse(value);
@@ -136,7 +136,7 @@ impl ParseUrl {
                 "REF" => url.fragment().map(String::from),
                 "PROTOCOL" => Some(url.scheme().to_string()),
                 "FILE" => {
-                    let path = url.path();
+                    let path = Self::file_path(value, &url);
                     match url.query() {
                         Some(query) => Some(format!("{path}?{query}")),
                         None => Some(path.to_string()),
@@ -155,6 +155,26 @@ impl ParseUrl {
                 }
                 _ => None,
             })
+    }
+
+    fn file_path<'a>(value: &str, url: &'a Url) -> &'a str {
+        let path = url.path();
+        if path == "/" && Self::absolute_url_has_empty_path(value) {
+            ""
+        } else {
+            path
+        }
+    }
+
+    fn absolute_url_has_empty_path(value: &str) -> bool {
+        let Some(authority_start) = value.find("://").map(|index| index + 3) else {
+            return false;
+        };
+        let after_authority = &value[authority_start..];
+        match after_authority.find(['/', '?', '#']) {
+            None => true,
+            Some(index) => matches!(after_authority.as_bytes()[index], b'?' | b'#'),
+        }
     }
 }
 
@@ -385,6 +405,28 @@ mod tests {
     fn test_parse_path_root_is_empty_string() -> Result<()> {
         let got = ParseUrl::parse("https://example.com/", "PATH", None)?;
         assert_eq!(got, Some("".to_string()));
+        Ok(())
+    }
+
+    #[test]
+    fn test_parse_empty_path_file() -> Result<()> {
+        assert_eq!(ParseUrl::parse("", "PATH", None)?, Some("".to_string()));
+        assert_eq!(
+            ParseUrl::parse("http://example.com", "FILE", None)?,
+            Some("".to_string())
+        );
+        assert_eq!(
+            ParseUrl::parse("http://example.com?foo=bar", "FILE", None)?,
+            Some("?foo=bar".to_string())
+        );
+        assert_eq!(
+            ParseUrl::parse("http://example.com#fragment", "FILE", None)?,
+            Some("".to_string())
+        );
+        assert_eq!(
+            ParseUrl::parse("http://example.com/?foo=bar", "FILE", None)?,
+            Some("/?foo=bar".to_string())
+        );
         Ok(())
     }
 
