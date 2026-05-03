@@ -1259,15 +1259,24 @@ impl protobuf::PhysicalPlanNode {
                                         )?,
                                     };
 
-                                    AggregateExprBuilder::new(agg_udf, input_phy_expr)
-                                        .schema(Arc::clone(&physical_schema))
-                                        .alias(name)
-                                        .human_display(agg_node.human_display.clone())
-                                        .with_ignore_nulls(agg_node.ignore_nulls)
-                                        .with_distinct(agg_node.distinct)
-                                        .order_by(order_bys)
-                                        .build()
-                                        .map(Arc::new)
+                                    let builder = AggregateExprBuilder::new(
+                                        agg_udf,
+                                        input_phy_expr,
+                                    )
+                                    .schema(Arc::clone(&physical_schema))
+                                    .alias(name)
+                                    .with_ignore_nulls(agg_node.ignore_nulls)
+                                    .with_distinct(agg_node.distinct)
+                                    .order_by(order_bys)
+                                    .human_display(agg_node.human_display.clone());
+                                    let builder = if let Some(alias) =
+                                        &agg_node.human_display_alias
+                                    {
+                                        builder.human_display_alias(alias.as_str())
+                                    } else {
+                                        builder
+                                    };
+                                    builder.build().map(Arc::new)
                                 }
                             })
                             .transpose()?

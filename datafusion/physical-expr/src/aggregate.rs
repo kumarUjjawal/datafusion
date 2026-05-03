@@ -55,6 +55,57 @@ use datafusion_functions_aggregate_common::order::AggregateOrderSensitivity;
 use datafusion_physical_expr_common::physical_expr::PhysicalExpr;
 use datafusion_physical_expr_common::sort_expr::PhysicalSortExpr;
 
+#[derive(Debug, Clone)]
+struct AggregateHumanDisplay {
+    expression: String,
+    alias: Option<String>,
+}
+
+impl AggregateHumanDisplay {
+    fn try_new(
+        expression: Option<String>,
+        alias: Option<String>,
+        name: &str,
+    ) -> Result<Option<Self>> {
+        let alias = alias.filter(|alias| !alias.is_empty());
+        let Some(expression) = expression else {
+            if alias.is_some() {
+                return internal_err!(
+                    "AggregateExprBuilder::human_display must be provided when human_display_alias is set"
+                );
+            }
+            return Ok(None);
+        };
+
+        if expression.is_empty() {
+            if alias.is_some() {
+                return internal_err!(
+                    "AggregateExprBuilder::human_display must be non-empty when human_display_alias is set"
+                );
+            }
+            return Ok(None);
+        }
+
+        if let Some(alias) = alias.as_deref()
+            && alias != name
+        {
+            return internal_err!(
+                "aggregate human_display_alias must match aggregate name `{name}`: {alias}"
+            );
+        }
+
+        Ok(Some(Self { expression, alias }))
+    }
+
+    fn expression(&self) -> &str {
+        &self.expression
+    }
+
+    fn alias(&self) -> Option<&str> {
+        self.alias.as_deref()
+    }
+}
+
 /// Builder for physical [`AggregateFunctionExpr`]
 ///
 /// `AggregateFunctionExpr` contains the information necessary to call
@@ -66,7 +117,9 @@ pub struct AggregateExprBuilder {
     args: Vec<Arc<dyn PhysicalExpr>>,
     alias: Option<String>,
     /// A human readable name
-    human_display: String,
+    human_display: Option<String>,
+    /// Optional visible output alias for `human_display`.
+    human_display_alias: Option<String>,
     /// Arrow Schema for the aggregate function
     schema: SchemaRef,
     /// The physical order by expressions
@@ -85,7 +138,8 @@ impl AggregateExprBuilder {
             fun,
             args,
             alias: None,
-            human_display: String::default(),
+            human_display: None,
+            human_display_alias: None,
             schema: Arc::new(Schema::empty()),
             order_bys: vec![],
             ignore_nulls: false,
@@ -190,6 +244,7 @@ impl AggregateExprBuilder {
             args,
             alias,
             human_display,
+            human_display_alias,
             schema,
             order_bys,
             ignore_nulls,
@@ -227,19 +282,8 @@ impl AggregateExprBuilder {
             Some(alias) => alias,
         };
 
-        if human_display_is_aliased {
-            let Some(display) = human_display.as_deref() else {
-                return internal_err!(
-                    "AggregateExprBuilder::human_display must be provided when human_display_is_aliased is true"
-                );
-            };
-
-            if strip_alias_suffix(display, &name).is_none() {
-                return internal_err!(
-                    "aliased aggregate human_display must end with ` as {name}`: {display}"
-                );
-            }
-        }
+        let human_display =
+            AggregateHumanDisplay::try_new(human_display, human_display_alias, &name)?;
 
         let arg_fields = args
             .iter()
@@ -269,8 +313,19 @@ impl AggregateExprBuilder {
         self
     }
 
-    pub fn human_display(mut self, name: String) -> Self {
-        self.human_display = name;
+    pub fn human_display(mut self, name: impl Into<String>) -> Self {
+        let name = name.into();
+        self.human_display = (!name.is_empty()).then_some(name);
+        if self.human_display.is_none() {
+            self.human_display_alias = None;
+        }
+        self
+    }
+
+    #[doc(hidden)]
+    pub fn human_display_alias(mut self, alias: impl Into<String>) -> Self {
+        let alias = alias.into();
+        self.human_display_alias = (!alias.is_empty()).then_some(alias);
         self
     }
 
@@ -329,7 +384,7 @@ pub struct AggregateFunctionExpr {
     /// Output column name that this expression creates
     name: String,
     /// Simplified name for `tree` explain.
-    human_display: String,
+    human_display: Option<AggregateHumanDisplay>,
     schema: Schema,
     // The physical order by expressions
     order_bys: Vec<PhysicalSortExpr>,
@@ -361,8 +416,17 @@ impl AggregateFunctionExpr {
     }
 
     /// Simplified name for `tree` explain.
-    pub fn human_display(&self) -> &str {
-        &self.human_display
+    pub fn human_display(&self) -> Option<&str> {
+        self.human_display
+            .as_ref()
+            .map(AggregateHumanDisplay::expression)
+    }
+
+    #[doc(hidden)]
+    pub fn human_display_alias(&self) -> Option<&str> {
+        self.human_display
+            .as_ref()
+            .and_then(AggregateHumanDisplay::alias)
     }
 
     /// Return if the aggregation is distinct
@@ -470,15 +534,21 @@ impl AggregateFunctionExpr {
             return Ok(None);
         };
 
-        AggregateExprBuilder::new(Arc::new(updated_fn), self.args.to_vec())
-            .order_by(self.order_bys.clone())
-            .schema(Arc::new(self.schema.clone()))
-            .alias(self.name().to_string())
-            .with_ignore_nulls(self.ignore_nulls)
-            .with_distinct(self.is_distinct)
-            .with_reversed(self.is_reversed)
-            .build()
-            .map(Some)
+        let mut builder =
+            AggregateExprBuilder::new(Arc::new(updated_fn), self.args.to_vec())
+                .order_by(self.order_bys.clone())
+                .schema(Arc::new(self.schema.clone()))
+                .alias(self.name().to_string())
+                .with_ignore_nulls(self.ignore_nulls)
+                .with_distinct(self.is_distinct)
+                .with_reversed(self.is_reversed);
+        if let Some(human_display) = self.human_display() {
+            builder = builder.human_display(human_display);
+        }
+        if let Some(alias) = self.human_display_alias() {
+            builder = builder.human_display_alias(alias);
+        }
+        builder.build().map(Some)
     }
 
     /// Creates accumulator implementation that supports retract
@@ -596,13 +666,12 @@ impl AggregateFunctionExpr {
             ReversedUDAF::NotSupported => None,
             ReversedUDAF::Identical => Some(self.clone()),
             ReversedUDAF::Reversed(reverse_udf) => {
-                let was_aliased = self.has_aliased_human_display();
+                let was_aliased = self.human_display_alias().is_some();
                 let mut name = self.name().to_string();
-                let mut human_display = self.human_display().map(str::to_string);
+                let mut human_display = self.human_display.clone();
                 // Reversing display follows two paths:
                 // - aliased display keeps the output `name` unchanged and rewrites only
-                //   the lowered expression in `human_display`, then re-attaches
-                //   `as <alias>`.
+                //   the lowered expression in `human_display`.
                 // - non-aliased display rewrites the canonical `name`, and rewrites
                 //   `human_display` only when present.
                 // If the function is changed, we need to reverse order_by clause as well
@@ -619,23 +688,14 @@ impl AggregateFunctionExpr {
                 }
 
                 if let Some(human_display) = human_display.as_mut() {
-                    if was_aliased {
-                        *human_display =
-                            strip_alias_suffix(human_display, self.name())?.to_string();
-                    }
-
                     if self.fun().name() != reverse_udf.name() {
-                        replace_order_by_clause(human_display);
+                        replace_order_by_clause(&mut human_display.expression);
                     }
                     replace_fn_name_clause(
-                        human_display,
+                        &mut human_display.expression,
                         self.fun.name(),
                         reverse_udf.name(),
                     );
-
-                    if was_aliased {
-                        *human_display = format!("{human_display} as {}", self.name());
-                    }
                 }
 
                 let mut builder =
@@ -643,12 +703,14 @@ impl AggregateFunctionExpr {
                         .order_by(self.order_bys.iter().map(|e| e.reverse()).collect())
                         .schema(Arc::new(self.schema.clone()))
                         .alias(name)
-                        .with_aliased_human_display(was_aliased)
                         .with_ignore_nulls(self.ignore_nulls)
                         .with_distinct(self.is_distinct)
                         .with_reversed(!self.is_reversed);
                 if let Some(human_display) = human_display {
-                    builder = builder.human_display(human_display);
+                    builder = builder.human_display(human_display.expression);
+                    if let Some(alias) = human_display.alias {
+                        builder = builder.human_display_alias(alias);
+                    }
                 }
                 builder.build().ok()
             }
@@ -805,5 +867,7 @@ fn replace_order_by_clause(order_by: &mut String) {
 }
 
 fn replace_fn_name_clause(aggr_name: &mut String, fn_name_old: &str, fn_name_new: &str) {
-    *aggr_name = aggr_name.replace(fn_name_old, fn_name_new);
+    if let Some(rest) = aggr_name.strip_prefix(fn_name_old) {
+        *aggr_name = format!("{fn_name_new}{rest}");
+    }
 }

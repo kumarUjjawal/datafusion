@@ -2493,7 +2493,8 @@ type AggregateExprWithOptionalArgs = (
 pub fn create_aggregate_expr_with_name_and_maybe_filter(
     e: &Expr,
     name: Option<String>,
-    human_displan: String,
+    human_display: Option<String>,
+    human_display_alias: Option<String>,
     logical_input_schema: &DFSchema,
     physical_input_schema: &Schema,
     execution_props: &ExecutionProps,
@@ -2537,16 +2538,20 @@ pub fn create_aggregate_expr_with_name_and_maybe_filter(
                     execution_props,
                 )?;
 
-                let agg_expr =
+                let mut builder =
                     AggregateExprBuilder::new(func.to_owned(), physical_args.to_vec())
                         .order_by(order_bys.clone())
                         .schema(Arc::new(physical_input_schema.to_owned()))
                         .alias(name)
-                        .human_display(human_displan)
                         .with_ignore_nulls(ignore_nulls)
-                        .with_distinct(*distinct)
-                        .build()
-                        .map(Arc::new)?;
+                        .with_distinct(*distinct);
+                if let Some(human_display) = human_display {
+                    builder = builder.human_display(human_display);
+                }
+                if let Some(alias) = human_display_alias {
+                    builder = builder.human_display_alias(alias);
+                }
+                let agg_expr = builder.build().map(Arc::new)?;
 
                 (agg_expr, filter, order_bys)
             };
@@ -2564,26 +2569,41 @@ pub fn create_aggregate_expr_and_maybe_filter(
     physical_input_schema: &Schema,
     execution_props: &ExecutionProps,
 ) -> Result<AggregateExprWithOptionalArgs> {
-    // Unpack (potentially nested) aliased logical expressions, e.g. "sum(col) as total"
-    // Some functions like `count_all()` create internal aliases,
-    // Unwrap all alias layers to get to the underlying aggregate function
-    let (name, human_display, e) = match e {
-        Expr::Alias(Alias { name, .. }) => {
+    // Unpack (potentially nested) aliased logical expressions, e.g. "sum(col) as total".
+    // Physical explain prefers the lowered aggregate form, so unwrap all alias
+    // layers to recover the underlying aggregate function and then re-attach
+    // only the visible output alias.
+    let (name, human_display, human_display_alias, e) = match e {
+        Expr::Alias(alias) => {
             let unaliased = e.clone().unalias_nested().data;
-            (Some(name.clone()), e.human_display().to_string(), unaliased)
+            let human_display = unaliased.human_display().to_string();
+            let (human_display, human_display_alias) =
+                if human_display.is_empty() || human_display == alias.name {
+                    (alias.name.clone(), None)
+                } else {
+                    (human_display, Some(alias.name.clone()))
+                };
+            (
+                Some(alias.name.clone()),
+                Some(human_display),
+                human_display_alias,
+                unaliased,
+            )
         }
         Expr::AggregateFunction(_) => (
             Some(e.schema_name().to_string()),
-            e.human_display().to_string(),
+            Some(e.human_display().to_string()),
+            None,
             e.clone(),
         ),
-        _ => (None, String::default(), e.clone()),
+        _ => (None, None, None, e.clone()),
     };
 
     create_aggregate_expr_with_name_and_maybe_filter(
         &e,
         name,
         human_display,
+        human_display_alias,
         logical_input_schema,
         physical_input_schema,
         execution_props,
@@ -3245,17 +3265,17 @@ mod tests {
     use arrow_schema::{FieldRef, SchemaRef};
     use datafusion_common::config::ConfigOptions;
     use datafusion_common::{
-        DFSchemaRef, ScalarValue, TableReference, ToDFSchema as _,
-        assert_batches_eq, assert_contains,
+        DFSchemaRef, ScalarValue, TableReference, ToDFSchema as _, assert_batches_eq,
+        assert_contains,
     };
     use datafusion_execution::TaskContext;
     use datafusion_execution::runtime_env::RuntimeEnv;
     use datafusion_expr::builder::subquery_alias;
     use datafusion_expr::function::{AccumulatorArgs, StateFieldsArgs};
     use datafusion_expr::{
-        Accumulator, AggregateUDF, AggregateUDFImpl, ExprFunctionExt,
-        LogicalPlanBuilder, Signature, TableSource, UserDefinedLogicalNodeCore,
-        Volatility, WindowFunctionDefinition, col, lit,
+        Accumulator, AggregateUDF, AggregateUDFImpl, ExprFunctionExt, LogicalPlanBuilder,
+        Signature, TableSource, UserDefinedLogicalNodeCore, Volatility,
+        WindowFunctionDefinition, col, lit,
     };
     use datafusion_functions_aggregate::count::{count_all, count_udaf};
     use datafusion_functions_aggregate::expr_fn::sum;
@@ -4133,6 +4153,134 @@ mod tests {
             "total_rows",
             physical_plan.schema().field(0).name().as_str()
         );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_aggregate_explain_shows_quoted_user_alias() -> Result<()> {
+        let schema = Arc::new(Schema::new(vec![Field::new(
+            "column1",
+            DataType::Int64,
+            false,
+        )]));
+
+        let logical_plan = scan_empty(None, schema.as_ref(), None)?
+            .aggregate(
+                Vec::<Expr>::new(),
+                vec![sum(col("column1")).alias("total rows")],
+            )?
+            .build()?;
+
+        assert_contains!(
+            aggregate_explain(&logical_plan).await?,
+            "AggregateExec: mode=Single, gby=[], aggr=[sum(?table?.column1) as total rows]"
+        );
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_aggregate_explain_shows_aliased_filter_expression() -> Result<()> {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("column1", DataType::Int64, false),
+            Field::new("column2", DataType::Int64, false),
+        ]));
+
+        let expr = sum(col("column1"))
+            .filter(col("column2").lt_eq(lit(0_i64)))
+            .build()?
+            .alias("agg");
+        let logical_plan = scan_empty(None, schema.as_ref(), None)?
+            .aggregate(Vec::<Expr>::new(), vec![expr])?
+            .build()?;
+
+        assert_contains!(
+            aggregate_explain(&logical_plan).await?,
+            "AggregateExec: mode=Single, gby=[], aggr=[sum(?table?.column1) FILTER (WHERE ?table?.column2 <= Int64(0)) as agg]"
+        );
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_aggregate_explain_shows_aliased_respect_nulls() -> Result<()> {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("column1", DataType::Int64, true),
+            Field::new("column2", DataType::Int64, false),
+        ]));
+
+        let expr = datafusion_functions_aggregate::first_last::first_value_udaf()
+            .call(vec![col("column1")])
+            .order_by(vec![col("column2").sort(true, true)])
+            .null_treatment(NullTreatment::RespectNulls)
+            .build()?
+            .alias("agg");
+        let logical_plan = scan_empty(None, schema.as_ref(), None)?
+            .aggregate(Vec::<Expr>::new(), vec![expr])?
+            .build()?;
+
+        assert_contains!(
+            aggregate_explain(&logical_plan).await?,
+            "AggregateExec: mode=Single, gby=[], aggr=[first_value(?table?.column1) RESPECT NULLS ORDER BY [?table?.column2 ASC NULLS FIRST] as agg]"
+        );
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_aggregate_explain_shows_count_all() -> Result<()> {
+        let logical_plan = test_csv_scan()
+            .await?
+            .aggregate(Vec::<Expr>::new(), vec![count_all()])?
+            .build()?;
+
+        assert_contains!(
+            aggregate_explain(&logical_plan).await?,
+            "aggr=[count(1) as count(*)]"
+        );
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_aggregate_explain_shows_count_all_with_user_alias() -> Result<()> {
+        let logical_plan = test_csv_scan()
+            .await?
+            .aggregate(Vec::<Expr>::new(), vec![count_all().alias("total_rows")])?
+            .build()?;
+
+        assert_contains!(
+            aggregate_explain(&logical_plan).await?,
+            "aggr=[count(1) as total_rows]"
+        );
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_aggregate_explain_shows_aliased_custom_human_display() -> Result<()> {
+        let schema = Arc::new(Schema::new(vec![Field::new(
+            "column1",
+            DataType::Int64,
+            false,
+        )]));
+
+        let logical_plan = scan_empty(None, schema.as_ref(), None)?
+            .aggregate(
+                Vec::<Expr>::new(),
+                vec![
+                    AggregateUDF::from(CustomHumanDisplayUdaf::new())
+                        .call(vec![col("column1")])
+                        .alias("agg"),
+                ],
+            )?
+            .build()?;
+
+        assert_contains!(
+            aggregate_explain(&logical_plan).await?,
+            "AggregateExec: mode=Single, gby=[], aggr=[custom_display(?table?.column1) as agg]"
+        );
+
         Ok(())
     }
 

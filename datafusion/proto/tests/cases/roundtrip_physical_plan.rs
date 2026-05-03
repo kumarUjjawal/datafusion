@@ -43,6 +43,7 @@ use datafusion::datasource::sink::DataSinkExec;
 use datafusion::datasource::source::DataSourceExec;
 use datafusion::execution::TaskContext;
 use datafusion::functions_aggregate::count::count_udaf;
+use datafusion::functions_aggregate::first_last::first_value_udaf;
 use datafusion::functions_aggregate::sum::sum_udaf;
 use datafusion::functions_window::nth_value::nth_value_udwf;
 use datafusion::functions_window::row_number::row_number_udwf;
@@ -2164,6 +2165,56 @@ async fn test_round_trip_human_display() -> Result<()> {
 
     let sql = "select r_name, count(r_name) from region group by r_name";
     roundtrip_test_sql_with_context(sql, &ctx).await?;
+
+    let sql = "select count(*) as count_star from region";
+    roundtrip_test_sql_with_context(sql, &ctx).await?;
+
+    Ok(())
+}
+
+#[test]
+fn test_round_trip_aliased_reverse_human_display() -> Result<()> {
+    let schema = Arc::new(Schema::new(vec![Field::new("b", DataType::Int64, true)]));
+    let agg_expr =
+        AggregateExprBuilder::new(first_value_udaf(), vec![col("b", &schema)?])
+            .order_by(vec![PhysicalSortExpr {
+                expr: col("b", &schema)?,
+                options: SortOptions::new(false, false),
+            }])
+            .schema(Arc::clone(&schema))
+            .alias("agg")
+            .human_display("first_value(b) ORDER BY [b ASC NULLS LAST]")
+            .human_display_alias("agg")
+            .build()
+            .map(Arc::new)?;
+
+    let plan = Arc::new(AggregateExec::try_new(
+        AggregateMode::Single,
+        PhysicalGroupBy::new(vec![], vec![], vec![], false),
+        vec![agg_expr],
+        vec![None],
+        Arc::new(EmptyExec::new(Arc::clone(&schema))),
+        schema,
+    )?);
+
+    let ctx = SessionContext::new();
+    let codec = DefaultPhysicalExtensionCodec {};
+    let proto_converter = DefaultPhysicalProtoConverter {};
+    let roundtrip_plan = roundtrip_test_and_return(plan, &ctx, &codec, &proto_converter)?;
+    let aggregate = roundtrip_plan
+        .as_ref()
+        .downcast_ref::<AggregateExec>()
+        .expect("expected AggregateExec after roundtrip");
+    let reversed = aggregate.aggr_expr()[0]
+        .reverse_expr()
+        .expect("expected reverse expr");
+
+    assert_eq!(reversed.name(), "agg");
+    assert_eq!(reversed.human_display_alias(), Some("agg"));
+    assert_eq!(
+        reversed.human_display(),
+        Some("last_value(b) ORDER BY [b DESC NULLS FIRST]")
+    );
 
     Ok(())
 }

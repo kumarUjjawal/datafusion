@@ -965,6 +965,7 @@ message PhysicalAggregateExprNode {
   bool ignore_nulls = 6;
   optional bytes fun_definition = 7;
   string human_display = 8;
+  optional string human_display_alias = 9;
 }
 
 message PhysicalWindowExprNode {

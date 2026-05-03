@@ -17,6 +17,7 @@
 
 //! Aggregates functionalities
 
+use std::borrow::Cow;
 use std::sync::Arc;
 
 use super::{DisplayAs, ExecutionPlanProperties, PlanProperties};
@@ -1374,7 +1375,7 @@ impl DisplayAs for AggregateExec {
                 let a: Vec<String> = self
                     .aggr_expr
                     .iter()
-                    .map(|agg| agg.name().to_string())
+                    .map(|agg| format_aggregate_exec_expr(agg).to_string())
                     .collect();
                 write!(f, ", aggr=[{}]", a.join(", "))?;
                 if let Some(config) = self.limit_options {
@@ -1428,7 +1429,7 @@ impl DisplayAs for AggregateExec {
                 let a: Vec<String> = self
                     .aggr_expr
                     .iter()
-                    .map(|agg| agg.human_display().to_string())
+                    .map(|agg| format_tree_aggregate_expr(agg).to_string())
                     .collect();
                 writeln!(f, "mode={:?}", self.mode)?;
                 if !g.is_empty() {
@@ -1444,6 +1445,29 @@ impl DisplayAs for AggregateExec {
         }
         Ok(())
     }
+}
+
+fn format_aggregate_exec_expr(agg: &AggregateFunctionExpr) -> Cow<'_, str> {
+    match agg.human_display_alias() {
+        Some(_) => format_human_display(agg.human_display(), agg.human_display_alias())
+            .unwrap_or_else(|| Cow::Borrowed(agg.name())),
+        None => Cow::Borrowed(agg.name()),
+    }
+}
+
+fn format_tree_aggregate_expr(agg: &AggregateFunctionExpr) -> Cow<'_, str> {
+    format_human_display(agg.human_display(), agg.human_display_alias())
+        .unwrap_or_else(|| Cow::Borrowed(agg.name()))
+}
+
+fn format_human_display<'a>(
+    human_display: Option<&'a str>,
+    alias: Option<&'a str>,
+) -> Option<Cow<'a, str>> {
+    human_display.map(|human_display| match alias {
+        Some(alias) => Cow::Owned(format!("{human_display} as {alias}")),
+        None => Cow::Borrowed(human_display),
+    })
 }
 
 impl ExecutionPlan for AggregateExec {
@@ -3032,18 +3056,21 @@ mod tests {
             }])
             .schema(Arc::clone(&schema))
             .alias("agg")
-            .human_display(
-                "first_value(b) ORDER BY [b ASC NULLS LAST] as agg".to_string(),
-            )
-            .with_aliased_human_display(true)
+            .human_display("first_value(b) ORDER BY [b ASC NULLS LAST]")
+            .human_display_alias("agg")
             .build()?;
 
         let reversed = agg.reverse_expr().expect("expected reverse expr");
 
         assert_eq!(reversed.name(), "agg");
+        assert_eq!(reversed.human_display_alias(), Some("agg"));
+        assert_eq!(
+            format_tree_aggregate_expr(&reversed),
+            "last_value(b) ORDER BY [b DESC NULLS FIRST] as agg"
+        );
         assert_eq!(
             reversed.human_display(),
-            Some("last_value(b) ORDER BY [b DESC NULLS FIRST] as agg")
+            Some("last_value(b) ORDER BY [b DESC NULLS FIRST]")
         );
 
         Ok(())
@@ -3067,10 +3094,9 @@ mod tests {
         .schema(Arc::clone(&schema))
         .alias("agg")
         .human_display(
-            "first_value(first_value_col) ORDER BY [first_value_col ASC NULLS LAST] as agg"
-                .to_string(),
+            "first_value(first_value_col) ORDER BY [first_value_col ASC NULLS LAST]",
         )
-        .with_aliased_human_display(true)
+        .human_display_alias("agg")
         .build()?;
 
         let reversed = agg.reverse_expr().expect("expected reverse expr");
@@ -3079,8 +3105,12 @@ mod tests {
         assert_eq!(
             reversed.human_display(),
             Some(
-                "last_value(first_value_col) ORDER BY [first_value_col DESC NULLS FIRST] as agg"
+                "last_value(first_value_col) ORDER BY [first_value_col DESC NULLS FIRST]"
             )
+        );
+        assert_eq!(
+            format_tree_aggregate_expr(&reversed),
+            "last_value(first_value_col) ORDER BY [first_value_col DESC NULLS FIRST] as agg"
         );
 
         Ok(())
@@ -3106,7 +3136,7 @@ mod tests {
     }
 
     #[test]
-    fn test_aliased_human_display_requires_alias_suffix() -> Result<()> {
+    fn test_human_display_alias_must_match_name() -> Result<()> {
         let schema = create_test_schema()?;
         let error =
             AggregateExprBuilder::new(first_value_udaf(), vec![col("b", &schema)?])
@@ -3117,14 +3147,14 @@ mod tests {
                 .schema(Arc::clone(&schema))
                 .alias("agg")
                 .human_display("first_value(b) ORDER BY [b ASC NULLS LAST]")
-                .with_aliased_human_display(true)
+                .human_display_alias("other_alias")
                 .build()
                 .unwrap_err();
 
         assert!(
             error
                 .to_string()
-                .contains("aliased aggregate human_display must end with")
+                .contains("aggregate human_display_alias must match")
         );
 
         Ok(())

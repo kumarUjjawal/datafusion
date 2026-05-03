@@ -81,7 +81,13 @@ pub fn serialize_physical_aggr_expr(
                 distinct: aggr_expr.is_distinct(),
                 ignore_nulls: aggr_expr.ignore_nulls(),
                 fun_definition: (!buf.is_empty()).then_some(buf),
-                human_display: aggr_expr.human_display().to_string(),
+                human_display: aggr_expr
+                    .human_display()
+                    .unwrap_or_default()
+                    .to_string(),
+                human_display_alias: aggr_expr
+                    .human_display_alias()
+                    .map(ToString::to_string),
             },
         )),
     })
