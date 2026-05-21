@@ -22,13 +22,19 @@ use arrow::datatypes::DataType::Interval;
 use arrow::datatypes::IntervalUnit::MonthDayNano;
 use arrow::datatypes::{DataType, IntervalMonthDayNano};
 use datafusion_common::types::{NativeType, logical_float64, logical_int32};
-use datafusion_common::{DataFusionError, Result, ScalarValue, plan_datafusion_err};
+use datafusion_common::{
+    DataFusionError, Result, ScalarValue, exec_err, plan_datafusion_err,
+};
 use datafusion_expr::{
     Coercion, ColumnarValue, ScalarFunctionArgs, ScalarUDFImpl, Signature, TypeSignature,
     TypeSignatureClass, Volatility,
 };
 use datafusion_functions::utils::make_scalar_function;
 
+/// Spark-compatible `make_interval` function.
+///
+/// In ANSI mode, overflow and non-finite `secs` values return
+/// `INTERVAL_ARITHMETIC_OVERFLOW`; otherwise they return `NULL`.
 #[derive(Debug, PartialEq, Eq, Hash)]
 pub struct SparkMakeInterval {
     signature: Signature,
@@ -123,11 +129,18 @@ impl ScalarUDFImpl for SparkMakeInterval {
                 Some(IntervalMonthDayNano::new(0, 0, 0)),
             )));
         }
-        make_scalar_function(make_interval_kernel, vec![])(&args.args)
+        let enable_ansi_mode = args.config_options.execution.enable_ansi_mode;
+        make_scalar_function(
+            move |arrs: &[ArrayRef]| make_interval_kernel(arrs, enable_ansi_mode),
+            vec![],
+        )(&args.args)
     }
 }
 
-fn make_interval_kernel(args: &[ArrayRef]) -> Result<ArrayRef, DataFusionError> {
+fn make_interval_kernel(
+    args: &[ArrayRef],
+    enable_ansi_mode: bool,
+) -> Result<ArrayRef, DataFusionError> {
     use arrow::array::AsArray;
     use arrow::datatypes::{Float64Type, Int32Type};
 
@@ -189,17 +202,27 @@ fn make_interval_kernel(args: &[ArrayRef]) -> Result<ArrayRef, DataFusionError> 
 
     for i in 0..n_rows {
         // if one column is NULL → result NULL
-        let any_null_present = years.is_null(i)
+        let any_null = years.is_null(i)
             || months.as_ref().is_some_and(|a| a.is_null(i))
             || weeks.as_ref().is_some_and(|a| a.is_null(i))
             || days.as_ref().is_some_and(|a| a.is_null(i))
             || hours.as_ref().is_some_and(|a| a.is_null(i))
             || mins.as_ref().is_some_and(|a| a.is_null(i))
-            || secs
-                .as_ref()
-                .is_some_and(|a| a.is_null(i) || !a.value(i).is_finite());
+            || secs.as_ref().is_some_and(|a| a.is_null(i));
 
-        if any_null_present {
+        if any_null {
+            builder.append_null();
+            continue;
+        }
+
+        let non_finite_secs = secs.as_ref().is_some_and(|a| !a.value(i).is_finite());
+
+        if non_finite_secs {
+            if enable_ansi_mode {
+                return exec_err!(
+                    "[INTERVAL_ARITHMETIC_OVERFLOW] non-finite seconds value in make_interval"
+                );
+            }
             builder.append_null();
             continue;
         }
@@ -216,6 +239,11 @@ fn make_interval_kernel(args: &[ArrayRef]) -> Result<ArrayRef, DataFusionError> 
         match make_interval_month_day_nano(y, mo, w, d, h, mi, s) {
             Some(v) => builder.append_value(v),
             None => {
+                if enable_ansi_mode {
+                    return exec_err!(
+                        "[INTERVAL_ARITHMETIC_OVERFLOW] make_interval({y}, {mo}, {w}, {d}, {h}, {mi}, {s})"
+                    );
+                }
                 builder.append_null();
                 continue;
             }
@@ -274,7 +302,11 @@ mod tests {
 
     use super::*;
     fn run_make_interval_month_day_nano(arrs: Vec<ArrayRef>) -> Result<ArrayRef> {
-        make_interval_kernel(&arrs)
+        make_interval_kernel(&arrs, false)
+    }
+
+    fn run_make_interval_month_day_nano_ansi(arrs: Vec<ArrayRef>) -> Result<ArrayRef> {
+        make_interval_kernel(&arrs, true)
     }
 
     #[test]
@@ -500,6 +532,54 @@ mod tests {
         assert_eq!(v.days, 3 * 7 + 4); // 25
         let expected_nanos = (5_i64 * 3600 + 6 * 60 + 7) * 1_000_000_000 + 250_000_000;
         assert_eq!(v.nanoseconds, expected_nanos);
+    }
+
+    #[test]
+    fn overflow_errors_when_ansi_enabled() {
+        let year = Arc::new(Int32Array::from(vec![Some(i32::MAX)])) as ArrayRef;
+        let month = Arc::new(Int32Array::from(vec![Some(1)])) as ArrayRef;
+        let week = Arc::new(Int32Array::from(vec![Some(0)])) as ArrayRef;
+        let day = Arc::new(Int32Array::from(vec![Some(0)])) as ArrayRef;
+        let hour = Arc::new(Int32Array::from(vec![Some(0)])) as ArrayRef;
+        let min = Arc::new(Int32Array::from(vec![Some(0)])) as ArrayRef;
+        let sec = Arc::new(Float64Array::from(vec![Some(0.0)])) as ArrayRef;
+
+        let res = run_make_interval_month_day_nano_ansi(vec![
+            year, month, week, day, hour, min, sec,
+        ]);
+        let err = res.expect_err("expected overflow to error in ANSI mode");
+        assert!(
+            matches!(err, DataFusionError::Execution(_)),
+            "expected execution error, got {err:?}"
+        );
+        assert!(
+            err.to_string().contains("INTERVAL_ARITHMETIC_OVERFLOW"),
+            "error message should mention INTERVAL_ARITHMETIC_OVERFLOW, got: {err}"
+        );
+    }
+
+    #[test]
+    fn non_finite_secs_errors_when_ansi_enabled() {
+        let year = Arc::new(Int32Array::from(vec![Some(0)])) as ArrayRef;
+        let month = Arc::new(Int32Array::from(vec![Some(0)])) as ArrayRef;
+        let week = Arc::new(Int32Array::from(vec![Some(0)])) as ArrayRef;
+        let day = Arc::new(Int32Array::from(vec![Some(0)])) as ArrayRef;
+        let hour = Arc::new(Int32Array::from(vec![Some(0)])) as ArrayRef;
+        let min = Arc::new(Int32Array::from(vec![Some(0)])) as ArrayRef;
+        let sec = Arc::new(Float64Array::from(vec![Some(f64::INFINITY)])) as ArrayRef;
+
+        let res = run_make_interval_month_day_nano_ansi(vec![
+            year, month, week, day, hour, min, sec,
+        ]);
+        let err = res.expect_err("expected non-finite secs to error in ANSI mode");
+        assert!(
+            matches!(err, DataFusionError::Execution(_)),
+            "expected execution error, got {err:?}"
+        );
+        assert!(
+            err.to_string().contains("INTERVAL_ARITHMETIC_OVERFLOW"),
+            "error message should mention INTERVAL_ARITHMETIC_OVERFLOW, got: {err}"
+        );
     }
 
     #[test]

@@ -24,7 +24,7 @@ use arrow::datatypes::TimeUnit::Microsecond;
 use arrow::datatypes::{DataType, Field, FieldRef, Float64Type, Int32Type};
 use datafusion_common::types::{NativeType, logical_float64, logical_int32};
 use datafusion_common::{
-    DataFusionError, Result, ScalarValue, internal_err, plan_datafusion_err,
+    DataFusionError, Result, ScalarValue, exec_err, internal_err, plan_datafusion_err,
 };
 use datafusion_expr::{
     Coercion, ColumnarValue, ReturnFieldArgs, ScalarFunctionArgs, ScalarUDFImpl,
@@ -32,6 +32,10 @@ use datafusion_expr::{
 };
 use datafusion_functions::utils::make_scalar_function;
 
+/// Spark-compatible `make_dt_interval` function.
+///
+/// In ANSI mode, overflow and non-finite `secs` values return
+/// `INTERVAL_ARITHMETIC_OVERFLOW`; otherwise they return `NULL`.
 #[derive(Debug, PartialEq, Eq, Hash)]
 pub struct SparkMakeDtInterval {
     signature: Signature,
@@ -132,11 +136,18 @@ impl ScalarUDFImpl for SparkMakeDtInterval {
                 args.args.len()
             )));
         }
-        make_scalar_function(make_dt_interval_kernel, vec![])(&args.args)
+        let enable_ansi_mode = args.config_options.execution.enable_ansi_mode;
+        make_scalar_function(
+            move |arrs: &[ArrayRef]| make_dt_interval_kernel(arrs, enable_ansi_mode),
+            vec![],
+        )(&args.args)
     }
 }
 
-fn make_dt_interval_kernel(args: &[ArrayRef]) -> Result<ArrayRef, DataFusionError> {
+fn make_dt_interval_kernel(
+    args: &[ArrayRef],
+    enable_ansi_mode: bool,
+) -> Result<ArrayRef, DataFusionError> {
     let n_rows = args[0].len();
     let days = args[0]
         .as_primitive_opt::<Int32Type>()
@@ -169,14 +180,24 @@ fn make_dt_interval_kernel(args: &[ArrayRef]) -> Result<ArrayRef, DataFusionErro
 
     for i in 0..n_rows {
         // if one column is NULL → result NULL
-        let any_null_present = days.is_null(i)
+        let any_null = days.is_null(i)
             || hours.as_ref().is_some_and(|a| a.is_null(i))
             || mins.as_ref().is_some_and(|a| a.is_null(i))
-            || secs
-                .as_ref()
-                .is_some_and(|a| a.is_null(i) || !a.value(i).is_finite());
+            || secs.as_ref().is_some_and(|a| a.is_null(i));
 
-        if any_null_present {
+        if any_null {
+            builder.append_null();
+            continue;
+        }
+
+        let non_finite_secs = secs.as_ref().is_some_and(|a| !a.value(i).is_finite());
+
+        if non_finite_secs {
+            if enable_ansi_mode {
+                return exec_err!(
+                    "[INTERVAL_ARITHMETIC_OVERFLOW] non-finite seconds value in make_dt_interval"
+                );
+            }
             builder.append_null();
             continue;
         }
@@ -190,6 +211,11 @@ fn make_dt_interval_kernel(args: &[ArrayRef]) -> Result<ArrayRef, DataFusionErro
         match make_interval_dt_nano(d, h, mi, s) {
             Some(v) => builder.append_value(v),
             None => {
+                if enable_ansi_mode {
+                    return exec_err!(
+                        "[INTERVAL_ARITHMETIC_OVERFLOW] make_dt_interval({d}, {h}, {mi}, {s})"
+                    );
+                }
                 builder.append_null();
                 continue;
             }
@@ -248,7 +274,11 @@ mod tests {
     use super::*;
 
     fn run_make_dt_interval(arrs: Vec<ArrayRef>) -> Result<ArrayRef> {
-        make_dt_interval_kernel(&arrs)
+        make_dt_interval_kernel(&arrs, false)
+    }
+
+    fn run_make_dt_interval_ansi(arrs: Vec<ArrayRef>) -> Result<ArrayRef> {
+        make_dt_interval_kernel(&arrs, true)
     }
 
     #[test]
@@ -385,6 +415,44 @@ mod tests {
         }
 
         Ok(())
+    }
+
+    #[test]
+    fn overflow_errors_when_ansi_enabled() {
+        let days = Arc::new(Int32Array::from(vec![Some(i32::MAX)])) as ArrayRef;
+        let hours = Arc::new(Int32Array::from(vec![Some(1)])) as ArrayRef;
+        let mins = Arc::new(Int32Array::from(vec![Some(1)])) as ArrayRef;
+        let secs = Arc::new(Float64Array::from(vec![Some(1.0)])) as ArrayRef;
+
+        let res = run_make_dt_interval_ansi(vec![days, hours, mins, secs]);
+        let err = res.expect_err("expected overflow to error in ANSI mode");
+        assert!(
+            matches!(err, DataFusionError::Execution(_)),
+            "expected execution error, got {err:?}"
+        );
+        assert!(
+            err.to_string().contains("INTERVAL_ARITHMETIC_OVERFLOW"),
+            "error message should mention INTERVAL_ARITHMETIC_OVERFLOW, got: {err}"
+        );
+    }
+
+    #[test]
+    fn non_finite_secs_errors_when_ansi_enabled() {
+        let days = Arc::new(Int32Array::from(vec![Some(0)])) as ArrayRef;
+        let hours = Arc::new(Int32Array::from(vec![Some(0)])) as ArrayRef;
+        let mins = Arc::new(Int32Array::from(vec![Some(0)])) as ArrayRef;
+        let secs = Arc::new(Float64Array::from(vec![Some(f64::NAN)])) as ArrayRef;
+
+        let res = run_make_dt_interval_ansi(vec![days, hours, mins, secs]);
+        let err = res.expect_err("expected non-finite secs to error in ANSI mode");
+        assert!(
+            matches!(err, DataFusionError::Execution(_)),
+            "expected execution error, got {err:?}"
+        );
+        assert!(
+            err.to_string().contains("INTERVAL_ARITHMETIC_OVERFLOW"),
+            "error message should mention INTERVAL_ARITHMETIC_OVERFLOW, got: {err}"
+        );
     }
 
     fn invoke_make_dt_interval_with_args(

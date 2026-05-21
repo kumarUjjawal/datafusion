@@ -104,3 +104,19 @@ query ?
 SELECT INTERVAL '1' SECOND AS iv;
 ----
 1.000000000 secs
+
+## ANSI mode: overflow / non-finite seconds raise INTERVAL_ARITHMETIC_OVERFLOW.
+statement ok
+set datafusion.execution.enable_ansi_mode = true;
+
+query error DataFusion error: Execution error: \[INTERVAL_ARITHMETIC_OVERFLOW\]
+SELECT make_interval(2147483647, 1, 0, 0, 0, 0, 0.0);
+
+query error DataFusion error: Execution error: \[INTERVAL_ARITHMETIC_OVERFLOW\]
+SELECT make_interval(0, 0, 2147483647, 1, 0, 0, 0.0);
+
+query error DataFusion error: Execution error: \[INTERVAL_ARITHMETIC_OVERFLOW\]
+SELECT make_interval(0, 0, 0, 0, 0, 0, arrow_cast('NaN','Float64'));
+
+statement ok
+set datafusion.execution.enable_ansi_mode = false;
