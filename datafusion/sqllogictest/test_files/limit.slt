@@ -991,32 +991,37 @@ statement ok
 DROP TABLE t21176;
 
 # Regression test for https://github.com/apache/datafusion/issues/22489
-# An outer ORDER BY / OFFSET must not reduce an inner LIMIT when separated
-# by a sort with different keys.
+# An outer ORDER BY / OFFSET must not reduce an inner LIMIT when the two are
+# separated by a sort on a *different* key.
+#
+# The aggregate forces a multi-partition plan whose inner `LIMIT` is realized
+# as a SortPreservingMergeExec(limit=4). Before the fix, the outer OFFSET had
+# already been materialized as a GlobalLimitExec above the outer sort, yet its
+# `skip` was left in the rule state and leaked into the child recursion, where
+# it merged with the inner limit (producing GlobalLimitExec skip=1, fetch=3).
+# That truncated the inner result *before* the outer re-sort and dropped the
+# grouped row g=4. `sx` and `sy` are anti-correlated so the two sorts do not
+# collapse, which is what exposes the leak.
 
 statement ok
-CREATE TABLE t22489_t0 (id INT) AS VALUES (0), (1);
+set datafusion.execution.target_partitions = 4;
 
 statement ok
-CREATE TABLE t22489_t1 (id INT, j INT) AS VALUES (1, 1);
+CREATE TABLE t22489 (g INT, x INT, y INT) AS VALUES (1, 10, 4), (2, 20, 3), (3, 30, 2), (4, 40, 1);
 
+# Inner ORDER BY sx DESC LIMIT 4 keeps all four groups; the outer ORDER BY
+# sy DESC OFFSET 1 then drops only the sy-max group (g=1), so g=2,3,4 remain.
 query III
 SELECT * FROM (
-  SELECT * FROM (
-    SELECT t0.id, COUNT(t0.id) AS count_id, COUNT(DISTINCT j) AS nunique_j
-    FROM t22489_t0 t0 LEFT JOIN t22489_t1 t1 ON t0.id = t1.id
-    GROUP BY t0.id
-  ) q
-  ORDER BY id DESC NULLS LAST, count_id DESC NULLS LAST, nunique_j DESC NULLS LAST
-  LIMIT 8
-) q2
-ORDER BY id DESC NULLS LAST, count_id DESC NULLS LAST, nunique_j ASC NULLS LAST
+  SELECT g, SUM(x) AS sx, SUM(y) AS sy FROM t22489 GROUP BY g
+  ORDER BY sx DESC LIMIT 4
+) q
+ORDER BY sy DESC
 OFFSET 1;
 ----
-0 1 0
+2 20 3
+3 30 2
+4 40 1
 
 statement ok
-DROP TABLE t22489_t0;
-
-statement ok
-DROP TABLE t22489_t1;
+DROP TABLE t22489;
