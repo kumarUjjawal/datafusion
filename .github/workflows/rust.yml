@@ -17,56 +17,356 @@
 
 # # CI runners
 
-name: Cargo artifact inventory
+name: Cargo artifact comparison
 'on':
   workflow_dispatch: {}
 permissions:
   contents: read
-  actions: read
 jobs:
-  inventory:
+  baseline-producer:
+    name: baseline / workspace
     runs-on: ubuntu-24.04
+    container:
+      image: amd64/rust@sha256:cc399942461d60f30d20a1e80f1a8f7720bb1590286da6e94626830711570923
+    steps:
+    - uses: runs-on/action@efac073ea2507ec18797de3a81704201ade11d9d
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      with:
+        ref: 67ddb91a9fefb1944f7e6e2f2efd595936e34332
+    - name: Setup Rust toolchain
+      uses: ./.github/actions/setup-builder
+      with:
+        rust-version: 1.98.1
+    - name: Record comparison environment
+      run: |
+        git rev-parse HEAD
+        rustc -Vv
+        cargo -V
+        nproc
+        lscpu
+        sha256sum Cargo.lock
+    - name: Rust Dependency Cache
+      uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6
+      with:
+        shared-key: amd-ci-check
+        save-if: 'false'
+    - name: Prepare cargo build
+      run: cargo xtask ci step check workspace
     timeout-minutes: 30
+    env:
+      CARGO_INCREMENTAL: '0'
+  artifact-producer:
+    name: trimmed artifact / workspace
+    runs-on: ubuntu-24.04
+    container:
+      image: amd64/rust@sha256:cc399942461d60f30d20a1e80f1a8f7720bb1590286da6e94626830711570923
+    steps:
+    - uses: runs-on/action@efac073ea2507ec18797de3a81704201ade11d9d
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      with:
+        ref: 67ddb91a9fefb1944f7e6e2f2efd595936e34332
+    - name: Setup Rust toolchain
+      uses: ./.github/actions/setup-builder
+      with:
+        rust-version: 1.98.1
+    - name: Record comparison environment
+      run: |
+        git rev-parse HEAD
+        rustc -Vv
+        cargo -V
+        nproc
+        lscpu
+        sha256sum Cargo.lock
+    - name: Rust Dependency Cache
+      uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6
+      with:
+        shared-key: amd-ci-check
+        save-if: 'false'
+    - name: Prepare cargo build
+      run: cargo xtask ci step check workspace
+    - name: Validate excluded directories
+      shell: bash
+      run: |
+        find "$CARGO_HOME/registry/src" -mindepth 3 -maxdepth 3 -type d -name false -print0 |
+          while IFS= read -r -d '' cache_dir; do
+            if grep -q '"false/' "${cache_dir%/false}/.cargo-checksum.json"; then
+              echo "Refusing to exclude packaged source files: $cache_dir" >&2
+              exit 1
+            fi
+            du --bytes --summarize "$cache_dir"
+          done > "$RUNNER_TEMP/incremental-cache-sizes.txt"
+        awk '{ count++; bytes += $1 } END { print "Excluded directories:", count, "bytes:", bytes }' "$RUNNER_TEMP/incremental-cache-sizes.txt"
+        du --bytes --max-depth=2 target "$CARGO_HOME/registry" | sort -nr
+    - name: Archive Cargo check artifacts
+      id: archive-check
+      shell: bash
+      run: |
+        mkdir -p "$RUNNER_TEMP/cargo-check"
+        # Preserve source timestamps and completed build outputs.
+        git ls-files -z | tar --null -T - -cf "$RUNNER_TEMP/cargo-check/check-workspace.tar" target
+        # The existing rustc flag writes incremental caches into directories named false.
+        tar --exclude='registry/src/*/*/false' -cf "$RUNNER_TEMP/cargo-check/check-registry.tar" -C "$CARGO_HOME" registry
+        du --bytes "$RUNNER_TEMP/cargo-check/"*
+    - name: Upload Cargo check artifacts
+      if: steps.archive-check.outcome == 'success'
+      uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+      with:
+        name: cargo-check
+        path: ${{ runner.temp }}/cargo-check/
+        compression-level: 1
+        retention-days: 1
+        if-no-files-found: error
+        overwrite: true
+    timeout-minutes: 30
+    env:
+      CARGO_INCREMENTAL: '0'
+  baseline-datafusion:
+    name: baseline / datafusion
+    runs-on: ubuntu-24.04
+    container:
+      image: amd64/rust@sha256:cc399942461d60f30d20a1e80f1a8f7720bb1590286da6e94626830711570923
+    steps:
+    - uses: runs-on/action@efac073ea2507ec18797de3a81704201ade11d9d
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      with:
+        ref: 67ddb91a9fefb1944f7e6e2f2efd595936e34332
+    - name: Setup Rust toolchain
+      uses: ./.github/actions/setup-builder
+      with:
+        rust-version: 1.98.1
+    - name: Record comparison environment
+      run: |
+        git rev-parse HEAD
+        rustc -Vv
+        cargo -V
+        nproc
+        lscpu
+        sha256sum Cargo.lock
+    - name: Rust Dependency Cache
+      uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6
+      with:
+        save-if: 'false'
+        shared-key: amd-ci
+    - name: Check datafusion (default features)
+      run: cargo xtask ci step check datafusion default
+    - name: Check datafusion (no-default-features)
+      run: cargo xtask ci step check datafusion no-default
+    - name: Check datafusion (nested_expressions)
+      run: cargo xtask ci step check datafusion nested_expressions
+    - name: Check datafusion (array_expressions)
+      run: cargo xtask ci step check datafusion array_expressions
+    - name: Check datafusion (avro)
+      run: cargo xtask ci step check datafusion avro
+    - name: Check datafusion (backtrace)
+      run: cargo xtask ci step check datafusion backtrace
+    - name: Check datafusion (compression)
+      run: cargo xtask ci step check datafusion compression
+    - name: Check datafusion (crypto_expressions)
+      run: cargo xtask ci step check datafusion crypto_expressions
+    - name: Check datafusion (datetime_expressions)
+      run: cargo xtask ci step check datafusion datetime_expressions
+    - name: Check datafusion (encoding_expressions)
+      run: cargo xtask ci step check datafusion encoding_expressions
+    - name: Check datafusion (force_hash_collisions)
+      run: cargo xtask ci step check datafusion force_hash_collisions
+    - name: Check datafusion (math_expressions)
+      run: cargo xtask ci step check datafusion math_expressions
+    - name: Check datafusion (parquet)
+      run: cargo xtask ci step check datafusion parquet
+    - name: Check datafusion (regex_expressions)
+      run: cargo xtask ci step check datafusion regex_expressions
+    - name: Check datafusion (recursive_protection)
+      run: cargo xtask ci step check datafusion recursive_protection
+    - name: Check datafusion (serde)
+      run: cargo xtask ci step check datafusion serde
+    - name: Check datafusion (sql)
+      run: cargo xtask ci step check datafusion sql
+    - name: Check datafusion (string_expressions)
+      run: cargo xtask ci step check datafusion string_expressions
+    - name: Check datafusion (unicode_expressions)
+      run: cargo xtask ci step check datafusion unicode_expressions
+    - name: Check parquet encryption (parquet_encryption)
+      run: cargo xtask ci step check datafusion parquet_encryption
+    timeout-minutes: 30
+    env:
+      CARGO_INCREMENTAL: '0'
+    needs: baseline-producer
+  artifact-datafusion:
+    name: artifact / datafusion
+    env:
+      CARGO_INCREMENTAL: '0'
+    runs-on: ubuntu-24.04
+    container:
+      image: amd64/rust@sha256:cc399942461d60f30d20a1e80f1a8f7720bb1590286da6e94626830711570923
+    steps:
+    - uses: runs-on/action@efac073ea2507ec18797de3a81704201ade11d9d
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      with:
+        ref: 67ddb91a9fefb1944f7e6e2f2efd595936e34332
+    - name: Setup Rust toolchain
+      uses: ./.github/actions/setup-builder
+      with:
+        rust-version: 1.98.1
+    - name: Record comparison environment
+      run: |
+        git rev-parse HEAD
+        rustc -Vv
+        cargo -V
+        nproc
+        lscpu
+        sha256sum Cargo.lock
+    - name: Download Cargo check artifacts
+      id: download-check
+      uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+      with:
+        name: cargo-check
+        path: ${{ runner.temp }}/cargo-check
+    - name: Restore Cargo check artifacts
+      if: steps.download-check.outcome == 'success'
+      run: |
+        tar -xf "$RUNNER_TEMP/cargo-check/check-workspace.tar"
+        tar -xf "$RUNNER_TEMP/cargo-check/check-registry.tar" -C "$CARGO_HOME"
+
+        test -d target/ci/.fingerprint
+        if find "$CARGO_HOME/registry/src" -mindepth 3 -maxdepth 3 -type d -name false | read -r unused; then
+          echo "Unexpected incremental directory in trimmed artifact" >&2
+          exit 1
+        fi
+    - name: Check datafusion (default features)
+      run: cargo xtask ci step check datafusion default
+    - name: Check datafusion (no-default-features)
+      run: cargo xtask ci step check datafusion no-default
+    - name: Check datafusion (nested_expressions)
+      run: cargo xtask ci step check datafusion nested_expressions
+    - name: Check datafusion (array_expressions)
+      run: cargo xtask ci step check datafusion array_expressions
+    - name: Check datafusion (avro)
+      run: cargo xtask ci step check datafusion avro
+    - name: Check datafusion (backtrace)
+      run: cargo xtask ci step check datafusion backtrace
+    - name: Check datafusion (compression)
+      run: cargo xtask ci step check datafusion compression
+    - name: Check datafusion (crypto_expressions)
+      run: cargo xtask ci step check datafusion crypto_expressions
+    - name: Check datafusion (datetime_expressions)
+      run: cargo xtask ci step check datafusion datetime_expressions
+    - name: Check datafusion (encoding_expressions)
+      run: cargo xtask ci step check datafusion encoding_expressions
+    - name: Check datafusion (force_hash_collisions)
+      run: cargo xtask ci step check datafusion force_hash_collisions
+    - name: Check datafusion (math_expressions)
+      run: cargo xtask ci step check datafusion math_expressions
+    - name: Check datafusion (parquet)
+      run: cargo xtask ci step check datafusion parquet
+    - name: Check datafusion (regex_expressions)
+      run: cargo xtask ci step check datafusion regex_expressions
+    - name: Check datafusion (recursive_protection)
+      run: cargo xtask ci step check datafusion recursive_protection
+    - name: Check datafusion (serde)
+      run: cargo xtask ci step check datafusion serde
+    - name: Check datafusion (sql)
+      run: cargo xtask ci step check datafusion sql
+    - name: Check datafusion (string_expressions)
+      run: cargo xtask ci step check datafusion string_expressions
+    - name: Check datafusion (unicode_expressions)
+      run: cargo xtask ci step check datafusion unicode_expressions
+    - name: Check parquet encryption (parquet_encryption)
+      run: cargo xtask ci step check datafusion parquet_encryption
+    timeout-minutes: 30
+    needs: artifact-producer
+  baseline-substrait:
+    name: baseline / substrait
+    runs-on: ubuntu-24.04
     container:
       image: amd64/rust@sha256:cc399942461d60f30d20a1e80f1a8f7720bb1590286da6e94626830711570923
     steps:
     - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
       with:
         ref: 67ddb91a9fefb1944f7e6e2f2efd595936e34332
-    - name: Download existing artifact
-      id: download
-      continue-on-error: true
-      uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
-      with:
-        repository: apache/datafusion
-        run-id: '34736985556'
-        name: cargo-check
-        github-token: ${{ github.token }}
-        path: ${{ runner.temp }}/cargo-check
-    - name: Restore existing artifact
-      if: steps.download.outcome == 'success'
-      run: 'tar -xf "$RUNNER_TEMP/cargo-check/check-workspace.tar"
-
-        tar -xf "$RUNNER_TEMP/cargo-check/check-registry.tar" -C "$CARGO_HOME"'
     - name: Setup Rust toolchain
-      if: steps.download.outcome != 'success'
       uses: ./.github/actions/setup-builder
       with:
         rust-version: 1.98.1
+    - name: Record comparison environment
+      run: |
+        git rev-parse HEAD
+        rustc -Vv
+        cargo -V
+        nproc
+        lscpu
+        sha256sum Cargo.lock
     - name: Rust Dependency Cache
-      if: steps.download.outcome != 'success'
       uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6
       with:
-        shared-key: amd-ci-check
         save-if: 'false'
-    - name: Reproduce workspace build if download is unavailable
-      if: steps.download.outcome != 'success'
-      run: cargo xtask ci step check workspace
-    - name: Inventory archive contents
-      run: 'du --bytes --max-depth=2 target "$CARGO_HOME/registry" | sort -nr
+        shared-key: amd-ci
+    - name: Check datafusion-substrait (default features)
+      run: cargo xtask ci step check datafusion-substrait default
+    - name: Check datafusion-substrait (no-default-features)
+      run: cargo xtask ci step check datafusion-substrait no-default
+    - name: Check datafusion-substrait (physical)
+      run: cargo xtask ci step check datafusion-substrait physical
+    - name: Install cmake
+      run: |
+        # note the builder setup runs apt-get update / installs protobuf compiler
+        apt-get install -y cmake
+    - name: Check datafusion-substrait (protoc)
+      run: cargo xtask ci step check datafusion-substrait protoc
+    timeout-minutes: 30
+    env:
+      CARGO_INCREMENTAL: '0'
+    needs: baseline-producer
+  artifact-substrait:
+    name: artifact / substrait
+    env:
+      CARGO_INCREMENTAL: '0'
+    runs-on: ubuntu-24.04
+    container:
+      image: amd64/rust@sha256:cc399942461d60f30d20a1e80f1a8f7720bb1590286da6e94626830711570923
+    steps:
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      with:
+        ref: 67ddb91a9fefb1944f7e6e2f2efd595936e34332
+    - name: Setup Rust toolchain
+      uses: ./.github/actions/setup-builder
+      with:
+        rust-version: 1.98.1
+    - name: Record comparison environment
+      run: |
+        git rev-parse HEAD
+        rustc -Vv
+        cargo -V
+        nproc
+        lscpu
+        sha256sum Cargo.lock
+    - name: Download Cargo check artifacts
+      id: download-check
+      uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+      with:
+        name: cargo-check
+        path: ${{ runner.temp }}/cargo-check
+    - name: Restore Cargo check artifacts
+      if: steps.download-check.outcome == 'success'
+      run: |
+        tar -xf "$RUNNER_TEMP/cargo-check/check-workspace.tar"
+        tar -xf "$RUNNER_TEMP/cargo-check/check-registry.tar" -C "$CARGO_HOME"
 
-        find target -type f -printf "%s %p\n" | sort -nr | sed -n "1,30p"
-
-        find "$CARGO_HOME/registry" -type f -printf "%s %p\n" | sort -nr | sed -n "1,20p"
-
-        df -h'
+        test -d target/ci/.fingerprint
+        if find "$CARGO_HOME/registry/src" -mindepth 3 -maxdepth 3 -type d -name false | read -r unused; then
+          echo "Unexpected incremental directory in trimmed artifact" >&2
+          exit 1
+        fi
+    - name: Check datafusion-substrait (default features)
+      run: cargo xtask ci step check datafusion-substrait default
+    - name: Check datafusion-substrait (no-default-features)
+      run: cargo xtask ci step check datafusion-substrait no-default
+    - name: Check datafusion-substrait (physical)
+      run: cargo xtask ci step check datafusion-substrait physical
+    - name: Install cmake
+      run: |
+        # note the builder setup runs apt-get update / installs protobuf compiler
+        apt-get install -y cmake
+    - name: Check datafusion-substrait (protoc)
+      run: cargo xtask ci step check datafusion-substrait protoc
+    timeout-minutes: 30
+    needs: artifact-producer
