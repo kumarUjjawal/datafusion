@@ -83,18 +83,17 @@ jobs:
         continue-on-error: true
         shell: bash
         run: |
+          mkdir -p "$RUNNER_TEMP/cargo-check"
           # Preserve source timestamps so Cargo can reuse workspace crates.
-          git ls-files -z | tar --null -T - -cf "$RUNNER_TEMP/check-workspace.tar" target
-          tar -cf "$RUNNER_TEMP/check-registry.tar" -C "$CARGO_HOME" registry
+          git ls-files -z | tar --null -T - -cf "$RUNNER_TEMP/cargo-check/check-workspace.tar" target
+          tar -cf "$RUNNER_TEMP/cargo-check/check-registry.tar" -C "$CARGO_HOME" registry
       - name: Upload Cargo check artifacts
         if: steps.archive-check.outcome == 'success'
         continue-on-error: true
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
         with:
           name: cargo-check
-          path: |
-            ${{ runner.temp }}/check-workspace.tar
-            ${{ runner.temp }}/check-registry.tar
+          path: ${{ runner.temp }}/cargo-check/
           compression-level: 1
           retention-days: 1
           if-no-files-found: error
