@@ -86,7 +86,10 @@ jobs:
           mkdir -p "$RUNNER_TEMP/cargo-check"
           # Preserve source timestamps so Cargo can reuse workspace crates.
           git ls-files -z | tar --null -T - -cf "$RUNNER_TEMP/cargo-check/check-workspace.tar" target
-          tar -cf "$RUNNER_TEMP/cargo-check/check-registry.tar" -C "$CARGO_HOME" registry
+          # -C incremental=false creates per-crate caches named "false".
+          tar --anchored --no-wildcards-match-slash \
+            --exclude='registry/src/*/*/false' \
+            -cf "$RUNNER_TEMP/cargo-check/check-registry.tar" -C "$CARGO_HOME" registry
       - name: Upload Cargo check artifacts
         if: steps.archive-check.outcome == 'success'
         continue-on-error: true
