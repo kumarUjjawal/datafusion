@@ -27,7 +27,7 @@ on:
         options: [cold, warm, changed]
         required: true
       trial:
-        description: Trial label
+        description: Comma-separated trial numbers, for example 1 or 2,3
         type: string
         default: "1"
       generation:
@@ -55,13 +55,14 @@ jobs:
 
   linux-build-lib:
     if: github.event_name == 'workflow_dispatch' && github.repository == 'kumarUjjawal/datafusion'
-    name: linux build test / ${{ matrix.cache }}
+    name: linux build test / ${{ matrix.cache }} / trial ${{ matrix.trial }}
     runs-on: ubuntu-24.04
     timeout-minutes: 40
     strategy:
       fail-fast: false
       matrix:
         cache: [rust-cache, mbx]
+        trial: ${{ fromJSON(format('[{0}]', inputs.trial)) }}
     defaults:
       run:
         shell: bash
@@ -132,7 +133,7 @@ jobs:
           CACHE_BACKEND: ${{ matrix.cache }}
           CACHE_HIT: ${{ matrix.cache == 'mbx' && steps.mbx.outputs.cache-hit || steps.baseline.outputs.cache-hit }}
           PHASE: ${{ inputs.phase }}
-          TRIAL: ${{ inputs.trial }}
+          TRIAL: ${{ matrix.trial }}
         run: |
           python3 - <<'PY'
           import json
@@ -149,6 +150,6 @@ jobs:
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: mbx-comparison-${{ matrix.cache }}-${{ inputs.phase }}-${{ inputs.trial }}
+          name: mbx-comparison-${{ matrix.cache }}-${{ inputs.phase }}-${{ matrix.trial }}
           path: ${{ runner.temp }}/mbx-comparison
           retention-days: 14
