@@ -16,11 +16,16 @@
 # under the License.
 
 name: mbx cache comparison
-run-name: mbx comparison / ${{ inputs.phase }} / trial ${{ inputs.trial }}
+run-name: mbx ${{ inputs.mbx-mode }} / ${{ inputs.phase }} / trial ${{ inputs.trial }}
 
 on:
   workflow_dispatch:
     inputs:
+      mbx-mode:
+        description: Target preserves current CI flags; objects disables incremental for both backends
+        type: choice
+        options: [target, objects]
+        default: target
       phase:
         description: Cold populates caches; warm reuses the seed; changed checks its child
         type: choice
@@ -82,6 +87,13 @@ jobs:
           rustup toolchain install 1.99.0 --profile minimal --component rustfmt
           rustup default 1.99.0
       - uses: ./.github/actions/setup-rust-runtime
+      - name: Disable incremental compilation for the objects comparison
+        if: inputs.mbx-mode == 'objects'
+        run: |
+          # rustc interprets `-C incremental=false` as a directory named false.
+          # Apply the correction to both backends to keep this comparison fair.
+          echo 'RUSTFLAGS=-C debuginfo=line-tables-only' >> "$GITHUB_ENV"
+          echo 'CARGO_INCREMENTAL=0' >> "$GITHUB_ENV"
       - name: Record runner and toolchain
         run: |
           mkdir -p "$RUNNER_TEMP/mbx-comparison"
@@ -104,6 +116,14 @@ jobs:
           prefix-key: ${{ inputs.generation }}-baseline
           shared-key: amd-ci-check
           save-if: ${{ inputs.phase == 'cold' }}
+      - name: Restore Cargo downloads for mbx objects
+        if: matrix.cache == 'mbx' && inputs.mbx-mode == 'objects'
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          prefix-key: ${{ inputs.generation }}-mbx-downloads
+          shared-key: amd-ci-check
+          cache-targets: false
+          save-if: ${{ inputs.phase == 'cold' }}
       - name: Restore mbx cache
         if: matrix.cache == 'mbx'
         id: mbx
@@ -111,9 +131,10 @@ jobs:
         with:
           version: 1.27.0
           backend: github
-          github-cache-mode: target
-          cache-key: ${{ inputs.generation }}-mbx-target-rust-1.99.0
-          restore-keys: ${{ inputs.generation }}-mbx-target-rust-1.99.0
+          github-cache-mode: ${{ inputs.mbx-mode }}
+          isolate-objects-cache: ${{ inputs.mbx-mode == 'objects' }}
+          cache-key: ${{ inputs.generation }}-mbx-${{ inputs.mbx-mode }}-rust-1.99.0
+          restore-keys: ${{ inputs.generation }}-mbx-${{ inputs.mbx-mode }}-rust-1.99.0
           save-on-workflow-dispatch: ${{ inputs.phase == 'cold' }}
       - name: Measure workspace check
         env:
@@ -134,13 +155,14 @@ jobs:
           CACHE_HIT: ${{ matrix.cache == 'mbx' && steps.mbx.outputs.cache-hit || steps.baseline.outputs.cache-hit }}
           PHASE: ${{ inputs.phase }}
           TRIAL: ${{ matrix.trial }}
+          MBX_MODE: ${{ inputs.mbx-mode }}
         run: |
           python3 - <<'PY'
           import json
           import os
           from pathlib import Path
           result = {key.lower(): os.environ[key] for key in (
-              "CACHE_BACKEND", "CACHE_HIT", "PHASE", "TRIAL", "SOURCE_REVISION")}
+              "CACHE_BACKEND", "CACHE_HIT", "PHASE", "TRIAL", "SOURCE_REVISION", "MBX_MODE")}
           path = Path(os.environ["RUNNER_TEMP"]) / "mbx-comparison" / "result.json"
           path.parent.mkdir(parents=True, exist_ok=True)
           path.write_text(json.dumps(result, indent=2) + "\n")
