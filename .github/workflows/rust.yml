@@ -68,6 +68,7 @@ concurrency:
 on:
   push:
     branches-ignore:
+      - 'kumar/mbx-ci-comparison'
       - 'gh-readonly-queue/**'
       - 'dependabot/**'
     paths-ignore:

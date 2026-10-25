@@ -24,6 +24,7 @@ concurrency:
 on:
   push:
     branches-ignore:
+      - 'kumar/mbx-ci-comparison'
       # Commits reach main through the merge queue, which runs this workflow at
       # the same SHA, so do not repeat the jobs after the merge. Release
       # branches and every other branch keep their post-push runs.

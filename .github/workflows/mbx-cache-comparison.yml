@@ -47,6 +47,7 @@ concurrency:
 
 jobs:
   register:
+    # Register the branch workflow without running the benchmark on pushes.
     if: github.event_name == 'push'
     runs-on: ubuntu-slim
     steps:
