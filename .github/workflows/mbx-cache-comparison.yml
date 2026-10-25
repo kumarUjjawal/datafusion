@@ -1,0 +1,153 @@
+# Licensed to the Apache Software Foundation (ASF) under one
+# or more contributor license agreements.  See the NOTICE file
+# distributed with this work for additional information
+# regarding copyright ownership.  The ASF licenses this file
+# to you under the Apache License, Version 2.0 (the
+# "License"); you may not use this file except in compliance
+# with the License.  You may obtain a copy of the License at
+#
+#   http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing,
+# software distributed under the License is distributed on an
+# "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+# KIND, either express or implied.  See the License for the
+# specific language governing permissions and limitations
+# under the License.
+
+name: mbx cache comparison
+run-name: mbx comparison / ${{ inputs.phase }} / trial ${{ inputs.trial }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      phase:
+        description: Cold populates caches; warm reuses the seed; changed checks its child
+        type: choice
+        options: [cold, warm, changed]
+        required: true
+      trial:
+        description: Trial label
+        type: string
+        default: "1"
+      generation:
+        description: Isolated cache generation; use a new value for a fresh cold run
+        type: string
+        default: mbx-ab-20261025-v1
+  push:
+    branches: [kumar/mbx-ci-comparison]
+    paths: [.github/workflows/mbx-cache-comparison.yml]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: mbx-comparison-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  register:
+    if: github.event_name == 'push'
+    runs-on: ubuntu-slim
+    steps:
+      - run: echo 'Dispatch this workflow to run the cache comparison.'
+
+  linux-build-lib:
+    if: github.event_name == 'workflow_dispatch' && github.repository == 'kumarUjjawal/datafusion'
+    name: linux build test / ${{ matrix.cache }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      matrix:
+        cache: [rust-cache, mbx]
+    defaults:
+      run:
+        shell: bash
+    env:
+      # The two revisions differ only in PR #26721's SQL planner fix and SLTs.
+      SOURCE_REVISION: ${{ inputs.phase == 'changed' && 'c61fb09ac123d669382287ceb7b8f36267fc4711' || 'fb7cf8e832bec8c09938a21ac09acd08a81df38c' }}
+      CARGO_TERM_COLOR: never
+      MBX_SAVINGS: plain
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ env.SOURCE_REVISION }}
+      - name: Setup identical build environment
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y protobuf-compiler
+          rustup toolchain install 1.99.0 --profile minimal --component rustfmt
+          rustup default 1.99.0
+      - uses: ./.github/actions/setup-rust-runtime
+      - name: Record runner and toolchain
+        run: |
+          mkdir -p "$RUNNER_TEMP/mbx-comparison"
+          {
+            git rev-parse HEAD
+            rustc -vV
+            cargo -V
+            uname -a
+            lscpu
+            free -h
+            df -h
+            printf 'ImageVersion=%s\n' "$ImageVersion"
+            printf 'RUSTFLAGS=%s\n' "$RUSTFLAGS"
+          } | tee "$RUNNER_TEMP/mbx-comparison/environment.txt"
+      - name: Restore existing Rust cache
+        if: matrix.cache == 'rust-cache'
+        id: baseline
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          prefix-key: ${{ inputs.generation }}-baseline
+          shared-key: amd-ci-check
+          save-if: ${{ inputs.phase == 'cold' }}
+      - name: Restore mbx cache
+        if: matrix.cache == 'mbx'
+        id: mbx
+        uses: jdx/mr-boxington-action@47ce49b32025d93a7a2f4570815afaa2b7092240
+        with:
+          version: 1.27.0
+          backend: github
+          github-cache-mode: target
+          cache-key: ${{ inputs.generation }}-mbx-target-rust-1.99.0
+          restore-keys: ${{ inputs.generation }}-mbx-target-rust-1.99.0
+          save-on-workflow-dispatch: ${{ inputs.phase == 'cold' }}
+      - name: Measure workspace check
+        env:
+          CACHE_BACKEND: ${{ matrix.cache }}
+        run: |
+          build=(cargo xtask ci step check workspace)
+          if [[ "$CACHE_BACKEND" == mbx ]]; then
+            build=(mbx xtask ci step check workspace)
+          fi
+          /usr/bin/time \
+            -f '{"wall_seconds":%e,"user_seconds":%U,"system_seconds":%S,"max_rss_kib":%M,"exit_status":%x}' \
+            -o "$RUNNER_TEMP/mbx-comparison/build-time.json" \
+            "${build[@]}" 2>&1 | tee "$RUNNER_TEMP/mbx-comparison/build.log"
+      - name: Record cache result
+        if: always()
+        env:
+          CACHE_BACKEND: ${{ matrix.cache }}
+          CACHE_HIT: ${{ matrix.cache == 'mbx' && steps.mbx.outputs.cache-hit || steps.baseline.outputs.cache-hit }}
+          PHASE: ${{ inputs.phase }}
+          TRIAL: ${{ inputs.trial }}
+        run: |
+          python3 - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+          result = {key.lower(): os.environ[key] for key in (
+              "CACHE_BACKEND", "CACHE_HIT", "PHASE", "TRIAL", "SOURCE_REVISION")}
+          path = Path(os.environ["RUNNER_TEMP"]) / "mbx-comparison" / "result.json"
+          path.parent.mkdir(parents=True, exist_ok=True)
+          path.write_text(json.dumps(result, indent=2) + "\n")
+          print(path.read_text())
+          PY
+      - name: Upload measurements
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: mbx-comparison-${{ matrix.cache }}-${{ inputs.phase }}-${{ inputs.trial }}
+          path: ${{ runner.temp }}/mbx-comparison
+          retention-days: 14
